@@ -19,6 +19,9 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
+      - name: Fetch maintained feature patch
+        uses: actions/checkout@v4
+
       - name: Fetch upstream and check published build
         id: upstream
         shell: bash
@@ -27,7 +30,7 @@ jobs:
           git clone --depth 1 --branch master https://github.com/liyangpengs/qq-farm-bot.git source
           revision=$(git -C source rev-parse HEAD)
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
-          if gh release view "upstream-$revision" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          if gh release view "upstream-$revision-milk-tea-auto-v1" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo 'build=false' >> "$GITHUB_OUTPUT"
           else
             echo 'build=true' >> "$GITHUB_OUTPUT"
@@ -86,6 +89,19 @@ jobs:
           p.write_text(s)
           PY
 
+      - name: Apply and test maintained milk tea automation
+        if: steps.upstream.outputs.build == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C source apply --check ../milk-tea-auto-v1.patch
+          git -C source apply ../milk-tea-auto-v1.patch
+          npm install --global pnpm@10.30.2
+          pnpm -C source install --frozen-lockfile
+          pnpm -C source/core test
+          pnpm -C source/web test
+          pnpm -C source/web typecheck
+
       - name: Build Linux image on GitHub
         if: steps.upstream.outputs.build == 'true'
         env:
@@ -96,7 +112,8 @@ jobs:
           docker build -f source/core/Dockerfile \
             --label "org.opencontainers.image.revision=$REVISION" \
             --label 'qq-farm.local-compatibility=qmsg-v3,qq-login-confirmed-without-qr' \
-            -t "qq-farm-bot:auto-${REVISION:0:12}" source
+            --label 'qq-farm.milk-tea-automation=milk-tea-auto-v1' \
+            -t "qq-farm-bot:auto-${REVISION:0:12}-milk-tea-auto-v1" source
 
       - name: Verify startup without real accounts or network
         if: steps.upstream.outputs.build == 'true'
@@ -105,9 +122,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          image="qq-farm-bot:auto-${REVISION:0:12}"
+          image="qq-farm-bot:auto-${REVISION:0:12}-milk-tea-auto-v1"
           docker run --rm --network=none --entrypoint node "$image" -e \
-            'require("./dist/services/qq-login/service"); require("./dist/services/push")'
+            'require("./dist/services/qq-login/service"); require("./dist/services/push"); const m=require("./dist/services/milk-tea"); if(typeof m.runMilkTeaAutomation!=="function" || m.getMilkTeaAutomationState().autoCraft) throw Error("milk tea capability missing or not opt-in")'
           docker run -d --name farm-check --network=none --tmpfs /app/core/data:rw,size=16m "$image"
           trap 'docker rm -f farm-check >/dev/null 2>&1 || true' EXIT
           for i in $(seq 1 60); do
@@ -127,7 +144,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          image="qq-farm-bot:auto-${REVISION:0:12}"
+          image="qq-farm-bot:auto-${REVISION:0:12}-milk-tea-auto-v1"
           docker save "$image" | gzip -1 > qq-farm-image.tar.gz
           export IMAGE_TAG="$image"
           python3 - <<'PY'
@@ -135,10 +152,10 @@ jobs:
           p=pathlib.Path('qq-farm-image.tar.gz')
           metadata={'revision':os.environ['REVISION'],'image_tag':os.environ['IMAGE_TAG'],
                     'sha256':hashlib.file_digest(p.open('rb'),'sha256').hexdigest(),'size':p.stat().st_size,
-                    'compatibility':['qmsg-v3','qq-login-confirmed-without-qr']}
+                    'build_capability':'milk-tea-auto-v1','compatibility':['qmsg-v3','qq-login-confirmed-without-qr','milk-tea-auto-v1']}
           pathlib.Path('manifest.json').write_text(json.dumps(metadata,indent=2))
           PY
-          gh release create "upstream-$REVISION" qq-farm-image.tar.gz manifest.json \
+          gh release create "upstream-$REVISION-milk-tea-auto-v1" qq-farm-image.tar.gz manifest.json \
             --repo "$GITHUB_REPOSITORY" --latest \
             --title "QQ Farm ${REVISION:0:12}" \
-            --notes "Automatic build of liyangpengs/qq-farm-bot master commit $REVISION, with QQ login and Qmsg compatibility fixes. No server credentials or account data are included."
+            --notes "Automatic build of liyangpengs/qq-farm-bot master commit $REVISION, with QQ login, Qmsg compatibility, and maintained opt-in milk tea automation v1. No server credentials or account data are included."
