@@ -45,9 +45,21 @@ const settings = defineModel<AutomationSettingsFormModel>({ required: true })
           <div class="space-y-3">
             <BaseSwitch v-model="settings.automation.milk_tea_auto_upgrade" class="automation-setting-item" label="自动升级奶茶店铺" />
             <BaseSwitch v-model="settings.automation.milk_tea_auto_craft" class="automation-setting-item" label="自动制作奶茶" />
+            <BaseSwitch v-model="settings.automation.milk_tea_auto_hire" class="automation-setting-item" label="自动雇佣好友" />
           </div>
           <p class="mt-3 text-sm text-gray-600 dark:text-gray-300">
-            后台每分钟检查一次，先升级再制作。仅使用已解锁配方对应的未锁定普通果实，每个所选堆叠会全部消耗；保留变异果实。未开业、结算期或活动结束时跳过。
+            后台每分钟检查一次，先升级再制作。仅使用已解锁配方对应的未锁定普通果实，每个所选堆叠会全部消耗；保留变异果实。未开业、结算期或活动结束时跳过。自动雇佣只在有空位时选择可雇佣的好友，并使用最短的 4 小时档；费用以服务器返回的奶茶券为准，券不足、剩余营业时间不够或只有机器人时跳过，不会购买奶茶券。
+          </p>
+        </section>
+        <section class="farm-card rounded-2xl p-4" aria-labelledby="dog-feed-automation-heading">
+          <h3 id="dog-feed-automation-heading" class="mb-3 text-base font-semibold">
+            农场宠物
+          </h3>
+          <div class="space-y-3">
+            <BaseSwitch v-model="settings.automation.dog_auto_feed" class="automation-setting-item" label="自动喂狗粮" />
+          </div>
+          <p class="mt-3 text-sm text-gray-600 dark:text-gray-300">
+            已上场的宠物看护时间耗尽，且背包里有未锁定狗粮时，喂一份时长最短的狗粮。仍有剩余看护时间、没有上场宠物或没有库存时跳过。不会购买狗粮。
           </p>
         </section>
         <section class="farm-card rounded-2xl p-4">

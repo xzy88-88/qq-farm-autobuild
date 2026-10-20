@@ -17,11 +17,13 @@ function harness() {
     let now = 1792032000;
     let failRefresh = false;
     let writes = 0;
+    let hireSucceeds = false;
     const milk = { head: { activity_id: '2026110101', name: '奶茶热销中', begin_time: 1792029600, end_time: 1794844799, settle_start_time: 1794671999 }, milk_tea: { summary: { shop_open_at: 1792030000, shop_name: '测试店铺', level: 1, total_revenue: 500 } } };
     const goods = { id: 301, item: [{ id: 20525, count: 1 }], cost: [{ id: 1001, count: 10000 }], purchase_limit: 108, purchased_count: 2, category_tag: 'seed', cond_hints: [] };
     const fund = { unlocked: false, unlock_cost: [{ id: 1004, count: 360 }], tiers: [{ tier_id: 1, state: 2, reward: [{ id: 1002, count: 288 }] }] };
     const bag = [{ id: 1042, count: 1 }, { id: 1041, count: 200 }, { id: 1001, count: 100000 }, { id: 40525, uid: 900, count: 20 }];
     const shop = { level: 1, sales_item_id: 1042, boost_cups_per_use: 40, drink_cups: { 2: 10 }, slots: [], pending_rewards: [{ id: 1041, count: 12 }] };
+    const hireList = { duration_id: 1, wage_total: 40, min_remain_biz_sec: 600, friends: [], robots: [{ friend: { gid: 101, name: '实习员工' }, is_robot: true }] };
     const work = { hire_subscribe_qq_jump_url: 'private-signature', hire_subscribe_template_id: 'private-template' };
     const fields = { 55: 'milk_tea_get_shop', 56: 'milk_tea_get_hire_list', 58: 'milk_tea_get_workshop', 60: 'milk_tea_boost', 62: 'milk_tea_craft', 57: 'milk_tea_hire', 1: 'shop_buy', 75: 'growth_fund_unlock', 76: 'growth_fund_claim', 63: 'milk_tea_get_work_page' };
     Object.assign(fields, { 54: 'milk_tea_rename_shop', 61: 'milk_tea_upgrade', 68: 'milk_tea_set_hire_disable', 65: 'milk_tea_interact' });
@@ -45,14 +47,25 @@ function harness() {
         let result;
         if (cmd === 55) result = { shop };
         else if (cmd === 58) result = { recipes: [{ recipe_id: 2, recipe_name: '甜莓奶茶', unlocked: true, is_advanced: true, stock_cups: 10 }] };
-        else if (cmd === 56) result = { duration_id: 1, wage_total: 40, min_remain_biz_sec: 600, robots: [{ friend: { gid: 101, name: '实习员工' }, is_robot: true }] };
+        else if (cmd === 56) result = hireList;
         else if (cmd === 63) result = work;
         else {
             calls.push(req); writes++;
             if (cmd === 60) { bag[0].count--; result = { cups: 40, token_gain: 183, coin_gain: 111375 }; }
             else if (cmd === 75) { fund.unlocked = true; result = {}; }
             else if (cmd === 76) { fund.tiers[0].state = 3; result = { claimed_tier_ids: [1], awards: [{ id: 1002, count: 288 }] }; }
-            else if (cmd === 57) result = { results: [{ success: false, error_code: 1, error_msg: '员工状态已变化' }] };
+            else if (cmd === 57) {
+                if (!hireSucceeds) result = { results: [{ success: false, error_code: 1, error_msg: '员工状态已变化' }] };
+                else {
+                    const hire = req.milk_tea_hire.hires[0];
+                    const coupon = bag.find(item => item.id === 1041);
+                    coupon.count -= Number(hireList.wage_total);
+                    shop.slots.push({ slot_index: Number(hire.slot_index), end_at: now + 14400 });
+                    const hiredFriend = (hireList.friends || []).find(entry => String(entry.friend.gid) === String(hire.target_gid));
+                    if (hiredFriend) hiredFriend.state = 1;
+                    result = { results: [{ success: true, slot_index: Number(hire.slot_index), duration_id: Number(hire.duration_id), target_gid: hire.target_gid }] };
+                }
+            }
             else if (cmd === 62) { result = { crafted_cups: { 2: 20 }, drink_cups: { 2: 30 }, used_fruits: [bag[3]] }; bag[3].count = 0; }
             else if (cmd === 61) { milk.milk_tea.summary.level++; milk.milk_tea.summary.can_upgrade = false; shop.level++; result = {}; }
             else result = { awards: [{ id: 20525, count: 1 }] };
@@ -60,7 +73,7 @@ function harness() {
         return { body: encode(types.MilkTeaOperateReply, { activity_id: req.activity_id, operate_type: cmd, [fields[cmd]]: result }) };
     } });
     const id = require.resolve('../dist/services/milk-tea'); delete require.cache[id];
-    return { service: require(id), calls, bag, shop, fund, goods, work, logs, automation, summary: milk.milk_tea.summary, get reads() { return reads; }, onBagRead: fn => onBagRead = fn, onDispatch: fn => onDispatch = fn, setTime: v => now = v, failRefresh: () => failRefresh = true };
+    return { service: require(id), calls, bag, shop, fund, goods, work, hireList, logs, automation, summary: milk.milk_tea.summary, get reads() { return reads; }, onBagRead: fn => onBagRead = fn, onDispatch: fn => onDispatch = fn, setTime: v => now = v, failRefresh: () => failRefresh = true, allowHire: () => hireSucceeds = true };
 }
 
 test('milk tea queued writes cancel on switch changes and settlement before actual dispatch', async () => {
@@ -185,6 +198,57 @@ test('milk tea automation backs off after an inventory change instead of immedia
     h.setTime(failed.nextCheckAt);
     await h.service.runMilkTeaAutomation();
     assert.equal(h.calls.length, 1);
+});
+
+test('milk tea automation hires available friends into empty slots and skips robots', async () => {
+    const h = harness();
+    h.allowHire();
+    h.automation.milk_tea_auto_hire = true;
+    h.shop.level = 3;
+    h.hireList.friends.push(
+        { friend: { gid: 202, name: '阿青' }, is_robot: false, state: 0, rehire_available_at: 0 },
+        { friend: { gid: 303, name: '小林' }, is_robot: false, state: 0, rehire_available_at: 0 },
+    );
+    const result = await h.service.runMilkTeaAutomation();
+    assert.equal(result?.status, 'success');
+    assert.equal(result?.hiredFriends, 2);
+    assert.deepEqual(h.calls.map(call => call.operate_type), ['57', '57']);
+    assert.deepEqual(h.calls.map(call => call.milk_tea_hire.hires[0].target_gid), ['202', '303']);
+    assert.deepEqual(h.calls.map(call => call.milk_tea_hire.hires[0].duration_id), [1, 1]);
+    assert.equal(h.bag.find(item => item.id === 1041).count, 120);
+    assert.equal(h.calls.some(call => call.operate_type === '1'), false);
+    assert.ok(h.logs.some(entry => entry[0] === '奶茶' && String(entry[1]).includes('阿青')));
+});
+
+test('milk tea automation does not hire robots, buy coupons, or fill a shop that is already staffed', async () => {
+    for (const scenario of ['robots', 'broke', 'full']) {
+        const h = harness();
+        h.allowHire();
+        h.automation.milk_tea_auto_hire = true;
+        if (scenario === 'broke') {
+            h.hireList.friends.push({ friend: { gid: 202, name: '阿青' }, is_robot: false, state: 0 });
+            h.bag.find(item => item.id === 1041).count = 39;
+        } else if (scenario === 'full') {
+            h.hireList.friends.push({ friend: { gid: 202, name: '阿青' }, is_robot: false, state: 0 });
+            h.shop.slots.push({ slot_index: 0, end_at: 1792042000 });
+        }
+        const result = await h.service.runMilkTeaAutomation();
+        assert.equal(result?.status, 'skipped', scenario);
+        assert.equal(h.calls.length, 0, scenario);
+        assert.equal(h.bag.find(item => item.id === 1041).count, scenario === 'broke' ? 39 : 200, scenario);
+    }
+});
+
+test('milk tea automation cancels a hire before dispatch when the switch is turned off', async () => {
+    const h = harness();
+    h.allowHire();
+    h.automation.milk_tea_auto_hire = true;
+    h.hireList.friends.push({ friend: { gid: 202, name: '阿青' }, is_robot: false, state: 0 });
+    h.onDispatch(cmd => { if (cmd === 57) h.automation.milk_tea_auto_hire = false; });
+    const result = await h.service.runMilkTeaAutomation();
+    assert.equal(result?.status, 'disabled');
+    assert.equal(h.calls.length, 0);
+    assert.equal(h.bag.find(item => item.id === 1041).count, 200);
 });
 
 test('boost spends the checked horn once and returns actual awards, retaining success after refresh failure', async () => {

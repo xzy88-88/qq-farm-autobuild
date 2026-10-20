@@ -8,6 +8,8 @@ export interface AutomationConfig {
   land_upgrade?: boolean
   milk_tea_auto_upgrade?: boolean
   milk_tea_auto_craft?: boolean
+  milk_tea_auto_hire?: boolean
+  dog_auto_feed?: boolean
   friend?: boolean
   friend_auto_accept?: boolean
   task?: boolean

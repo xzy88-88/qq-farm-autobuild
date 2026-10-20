@@ -54,6 +54,13 @@ export interface PetSnapshot {
     requestMethod: null
     skillsByPetId: Record<number, PetSkillInfo[]>
   }
+  automation?: {
+    autoFeed: boolean
+    status: string
+    message: string
+    lastCheckAt: number
+    nextCheckAt: number
+  }
 }
 
 export interface PetProtectLog {

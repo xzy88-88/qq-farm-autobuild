@@ -46,6 +46,18 @@ test('milk tea timer starts only for logged-in enabled accounts and uses the bac
     assert.equal(h.timers.size, 0);
 });
 
+test('milk tea timer also starts when only friend hiring is enabled', async () => {
+    const h = harness();
+    h.flags.milk_tea_auto_craft = false;
+    h.flags.milk_tea_auto_hire = true;
+    h.api.login(true);
+    h.api.start();
+    assert.equal(h.timers.get('milk_tea_interval')?.delay, 60000);
+    h.flags.milk_tea_auto_hire = false;
+    h.api.start();
+    assert.equal(h.timers.size, 0);
+});
+
 test('a callback from an old login generation cannot run milk tea actions', async () => {
     const h = harness();
     h.api.login(true); h.api.start();
