@@ -28,21 +28,27 @@ const operations: Record<string, [number, string, string]> = {
     fundClaim: [76, 'growth_fund_claim', FUND],
 };
 const readActions = new Set(['shop', 'hireList', 'workshop', 'work', 'rank', 'logs']);
+// 配置里最短、最便宜的雇佣档（4 小时）。实际扣费以服务器 wage_total 为准。
+const AUTO_HIRE_DURATION_ID = 1;
 let tail: Promise<any> = Promise.resolve();
 let automationFailures = 0;
-const automationState = { status: 'idle', message: '等待后台检查', lastCheckAt: 0, nextCheckAt: 0, upgraded: false, craftedCups: 0 };
+const automationState = { status: 'idle', message: '等待后台检查', lastCheckAt: 0, nextCheckAt: 0, upgraded: false, craftedCups: 0, hiredFriends: 0 };
+
+function milkTeaAutomationEnabled(flags: any) {
+    return !!(flags?.milk_tea_auto_upgrade || flags?.milk_tea_auto_craft || flags?.milk_tea_auto_hire);
+}
 
 function getMilkTeaAutomationState() {
     const flags = require('../models/store').getAutomation();
-    const enabled = !!(flags.milk_tea_auto_upgrade || flags.milk_tea_auto_craft);
-    return { ...automationState, autoUpgrade: !!flags.milk_tea_auto_upgrade, autoCraft: !!flags.milk_tea_auto_craft,
+    const enabled = milkTeaAutomationEnabled(flags);
+    return { ...automationState, autoUpgrade: !!flags.milk_tea_auto_upgrade, autoCraft: !!flags.milk_tea_auto_craft, autoHire: !!flags.milk_tea_auto_hire,
         ...(!enabled ? { status: 'disabled', message: '奶茶自动化已关闭' } : {}) };
 }
 
 function runMilkTeaAutomation(canContinue: () => boolean = () => true) {
     const result = tail.then(async () => {
         const flags = () => require('../models/store').getAutomation();
-        const enabled = () => canContinue() && !!(flags().milk_tea_auto_upgrade || flags().milk_tea_auto_craft);
+        const enabled = () => canContinue() && milkTeaAutomationEnabled(flags());
         const finish = (status: string, message: string) => {
             Object.assign(automationState, { status, message });
             return { ...automationState };
@@ -50,8 +56,9 @@ function runMilkTeaAutomation(canContinue: () => boolean = () => true) {
         if (!enabled()) return finish('disabled', '奶茶自动化已关闭');
         const now = getServerTimeSec();
         if (now < automationState.nextCheckAt) return { ...automationState };
-        Object.assign(automationState, { lastCheckAt: now, upgraded: false, craftedCups: 0 });
+        Object.assign(automationState, { lastCheckAt: now, upgraded: false, craftedCups: 0, hiredFriends: 0 });
         const messages: string[] = [];
+        const notes: string[] = [];
         try {
             let state = await getMilkTeaActivity('workshop');
             if (!enabled()) return finish('disabled', '奶茶自动化已关闭');
@@ -82,9 +89,20 @@ function runMilkTeaAutomation(canContinue: () => boolean = () => true) {
                     });
                 }
             }
+            if (canContinue() && flags().milk_tea_auto_hire && state.active && !state.settling) {
+                const hire = await hireAvailableFriends(canContinue, flags);
+                if (hire.stopped === 'disabled') return finish('disabled', '奶茶自动化已关闭');
+                messages.push(...hire.messages);
+                if (hire.note) notes.push(hire.note);
+            }
             automationFailures = 0;
             automationState.nextCheckAt = 0;
-            return finish(messages.length ? 'success' : 'skipped', messages.join('；') || '未达到升级条件，或暂无可制作的普通果实');
+            const idle = [
+                flags().milk_tea_auto_upgrade ? '未达到升级条件' : '',
+                flags().milk_tea_auto_craft ? '暂无可制作的普通果实' : '',
+                flags().milk_tea_auto_hire ? '暂无空闲员工位或可雇佣好友' : '',
+            ].filter(Boolean).join('，');
+            return finish(messages.length ? 'success' : 'skipped', [...messages, ...notes].filter(Boolean).join('；') || idle || '无需操作');
         } catch (error: any) {
             if (!enabled()) return finish('disabled', '奶茶自动化已关闭');
             automationFailures++;
@@ -96,6 +114,55 @@ function runMilkTeaAutomation(canContinue: () => boolean = () => true) {
     });
     tail = result.catch(() => {});
     return result;
+}
+
+function freeHireSlots(state: any) {
+    const level = config.MilkTeaStoreLevelConfig.find(v => v.level === toNum(state.shop?.level));
+    const now = getServerTimeSec();
+    return Array.from({ length: level?.employee_slot_count || 0 }, (_, slot) => slot)
+        .filter(slot => !(state.shop?.slots || []).some((v: any) => toNum(v.slot_index) === slot && toNum(v.end_at) > now));
+}
+
+function hireCandidates(state: any) {
+    const now = getServerTimeSec();
+    return (state.hire?.friends || [])
+        .filter((entry: any) => !entry.is_robot && entry.friend && toNum(entry.state) === 0 && toNum(entry.rehire_available_at) <= now)
+        .map((entry: any) => ({ gid: String(entry.friend.gid), name: String(entry.friend.name || entry.friend.gid) }));
+}
+
+async function hireAvailableFriends(canContinue: () => boolean, flags: () => any) {
+    const messages: string[] = [];
+    const seen = new Set<string>();
+    let note = '';
+    for (let attempt = 0; attempt < 4; attempt++) {
+        if (!canContinue() || !flags().milk_tea_auto_hire) return { messages, note, stopped: 'disabled' };
+        const preview = await getMilkTeaActivity('hireList', { durationId: AUTO_HIRE_DURATION_ID });
+        if (!preview.active || preview.settling || !toNum(preview.summary.shop_open_at)) return { messages, note, stopped: 'closed' };
+        const free = freeHireSlots(preview);
+        if (!free.length) return { messages, note: messages.length ? note : '员工位置已满' };
+        const friend = hireCandidates(preview).find(entry => !seen.has(entry.gid));
+        if (!friend) return { messages, note: messages.length ? note : '暂无可雇佣的好友' };
+        const wage = toNum(preview.hire?.wage_total);
+        if (!Number.isSafeInteger(wage) || wage < 0) fail('雇佣费用无效');
+        if ((preview.balances?.['1041'] || 0) < wage) return { messages, note: messages.length ? '奶茶券不足，停止继续雇佣' : '奶茶券不足，未雇佣' };
+        if (preview.settleStartTime - getServerTimeSec() < toNum(preview.hire?.min_remain_biz_sec)) return { messages, note: '剩余营业时间不足，未雇佣' };
+        seen.add(friend.gid);
+        const hired = await perform('hire', {
+            targetGid: friend.gid,
+            durationId: AUTO_HIRE_DURATION_ID,
+            expectedCosts: [{ id: 1041, count: wage }],
+            friendsOnly: true,
+            automationGuard: () => canContinue() && !!flags().milk_tea_auto_hire,
+        });
+        messages.push(`雇佣好友 ${friend.name}`);
+        automationState.hiredFriends = messages.length;
+        require('../utils/utils').log('奶茶', `自动雇佣好友 ${friend.name}`, {
+            module: 'activity', event: '奶茶自动雇佣', result: 'ok', gid: friend.gid, durationId: AUTO_HIRE_DURATION_ID, wage,
+        });
+        if (!hired.activity) return { messages, note: '雇佣已提交，等待下次检查刷新空位' };
+        if (freeHireSlots(hired.activity).length >= free.length) return { messages, note: '空位状态未刷新，暂停继续雇佣' };
+    }
+    return { messages, note };
 }
 
 function fail(message: string): never { throw new Error(message); }
@@ -296,7 +363,9 @@ async function perform(action: string, input: any) {
             .find(slot => !(state.shop.slots || []).some((v: any) => toNum(v.slot_index) === slot && toNum(v.end_at) > getServerTimeSec()));
         if (index === undefined) fail('员工位置已满');
         const target = String(input.targetGid);
-        const candidate = [...(state.hire.friends || []), ...(state.hire.robots || [])].find(v => String(v.friend?.gid) === target);
+        const pool = input.friendsOnly ? (state.hire.friends || []) : [...(state.hire.friends || []), ...(state.hire.robots || [])];
+        const candidate = pool.find((v: any) => String(v.friend?.gid) === target);
+        if (input.friendsOnly && candidate?.is_robot) fail('自动雇佣只选择好友');
         if (!candidate || toNum(candidate.state) !== 0 || toNum(candidate.rehire_available_at) > getServerTimeSec()) fail('该员工当前不可雇佣');
         if (state.settleStartTime - getServerTimeSec() < toNum(state.hire.min_remain_biz_sec)) fail('剩余营业时间不足');
         checkCost([{ id: 1041, count: toNum(state.hire.wage_total) }], input.expectedCosts, state.balances);

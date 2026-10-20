@@ -208,7 +208,7 @@ onUnmounted(() => sequence++)
       <main class="tea-scroll">
         <section v-if="mainState?.automation" class="mx-3 mb-3 rounded-xl bg-white/80 p-3 text-sm text-gray-700" aria-label="奶茶自动化状态">
           <div class="flex flex-wrap items-center justify-between gap-2">
-            <strong>自动升级：{{ mainState.automation.autoUpgrade ? '开启' : '关闭' }} · 自动制作：{{ mainState.automation.autoCraft ? '开启' : '关闭' }}</strong>
+            <strong>自动升级：{{ mainState.automation.autoUpgrade ? '开启' : '关闭' }} · 自动制作：{{ mainState.automation.autoCraft ? '开启' : '关闭' }} · 自动雇佣：{{ mainState.automation.autoHire ? '开启' : '关闭' }}</strong>
             <RouterLink to="/settings" class="text-green-700 underline underline-offset-2">
               前往设置 → 自动控制
             </RouterLink>

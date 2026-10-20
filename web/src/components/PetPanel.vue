@@ -320,6 +320,12 @@ watch(currentAccountId, () => {
             <div class="pet-duration__fill" :style="{ width: `${durationPercent}%` }" />
           </div>
           <small>上限 30 天 · 已使用 {{ durationPercent }}%</small>
+          <p v-if="snapshot.automation" class="mt-2 text-xs text-gray-500">
+            自动喂狗粮：{{ snapshot.automation.autoFeed ? '开启' : '关闭' }} · {{ snapshot.automation.message }}
+            <RouterLink class="ml-2 text-green-700 underline" to="/settings">
+              前往设置
+            </RouterLink>
+          </p>
         </div>
       </section>
 

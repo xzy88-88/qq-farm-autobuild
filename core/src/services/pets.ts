@@ -11,7 +11,7 @@ const { getBag, getBagItems } = require('./warehouse');
 const { getDogInfo } = require('./dog-skill-gifts');
 const { sendMsgAsync } = require('../utils/network');
 const { types } = require('../utils/proto');
-const { toNum, log, logWarn } = require('../utils/utils');
+const { toNum, log, logWarn, getServerTimeSec } = require('../utils/utils');
 
 const MAX_PROTECT_DURATION_SECONDS: number = 30 * 24 * 60 * 60;
 const PET_IDS: number[] = [90001, 90002, 90003, 90011, 90021, 90031];
@@ -87,6 +87,105 @@ function getPetSkillCatalog(): any {
 }
 
 let pendingFoodUse: Promise<any> | null = null;
+let dogFoodTail: Promise<any> = Promise.resolve();
+let dogFoodFailures = 0;
+const dogFoodAutomationState = {
+    status: 'idle',
+    message: '等待后台检查',
+    lastCheckAt: 0,
+    nextCheckAt: 0,
+    fedItemId: 0,
+    fedCount: 0,
+};
+
+function getDogFoodAutomationState() {
+    const enabled = !!require('../models/store').getAutomation().dog_auto_feed;
+    return {
+        ...dogFoodAutomationState,
+        autoFeed: enabled,
+        ...(!enabled ? { status: 'disabled', message: '自动喂狗粮已关闭' } : {}),
+    };
+}
+
+function chooseUnlockedDogFood(bagReply: any, protectDuration: number, maxProtectDuration: number) {
+    return Array.from(DOG_FOOD_DURATIONS.entries())
+        .map(([id, duration]) => ({ id, duration, count: getAvailableItemCount(bagReply, id, 0) }))
+        .filter(food => food.count > 0 && protectDuration + food.duration <= maxProtectDuration)
+        .sort((left, right) => left.duration - right.duration || left.id - right.id)[0] || null;
+}
+
+function runDogFoodAutomation(canContinue: () => boolean = () => true) {
+    const result = dogFoodTail.then(async () => {
+        const enabled = () => canContinue() && !!require('../models/store').getAutomation().dog_auto_feed;
+        const finish = (status: string, message: string) => {
+            Object.assign(dogFoodAutomationState, { status, message });
+            return { ...getDogFoodAutomationState() };
+        };
+        if (!enabled()) return finish('disabled', '自动喂狗粮已关闭');
+        const now = getServerTimeSec();
+        if (now < dogFoodAutomationState.nextCheckAt) return { ...getDogFoodAutomationState() };
+        Object.assign(dogFoodAutomationState, { lastCheckAt: now, fedItemId: 0, fedCount: 0 });
+        try {
+            const reply = await getDogInfo();
+            if (!enabled()) return finish('disabled', '自动喂狗粮已关闭');
+            const activeDogId = normalizeId(reply?.current_dog_id ?? reply?.currentDogId);
+            const protectDuration = getProtectDuration(reply);
+            const maxProtectDuration = Math.max(getMaxProtectDuration(reply), protectDuration);
+            if (!activeDogId) {
+                dogFoodFailures = 0;
+                dogFoodAutomationState.nextCheckAt = 0;
+                return finish('skipped', '未上场宠物，未消耗狗粮');
+            }
+            if (protectDuration > 0) {
+                dogFoodFailures = 0;
+                dogFoodAutomationState.nextCheckAt = 0;
+                return finish('skipped', '看护时间尚未耗尽');
+            }
+            const bagReply = await getBag();
+            if (!enabled()) return finish('disabled', '自动喂狗粮已关闭');
+            const food = chooseUnlockedDogFood(bagReply, protectDuration, maxProtectDuration);
+            if (!food) {
+                dogFoodFailures = 0;
+                dogFoodAutomationState.nextCheckAt = 0;
+                return finish('skipped', '背包没有可用狗粮，未购买');
+            }
+            const used = await useDogFood(food.id, 1, 0, {
+                onlyWhenProtectAtMost: 0,
+                beforeSend: () => enabled(),
+            });
+            dogFoodFailures = 0;
+            dogFoodAutomationState.nextCheckAt = 0;
+            dogFoodAutomationState.fedItemId = food.id;
+            dogFoodAutomationState.fedCount = Math.max(1, toNum(used?.used?.count));
+            log('宠物', `自动喂食${getItemById(food.id)?.name || `狗粮#${food.id}`} x1`, {
+                module: 'dog',
+                event: '自动喂狗粮',
+                result: 'ok',
+                itemId: food.id,
+                count: 1,
+            });
+            return finish('success', `已喂食${getItemById(food.id)?.name || `狗粮#${food.id}`} x1`);
+        } catch (error: any) {
+            if (!enabled()) return finish('disabled', '自动喂狗粮已关闭');
+            const message = String(error?.message || '自动喂狗粮失败');
+            if (message.includes('已跳过') || message.includes('已停止')) {
+                dogFoodFailures = 0;
+                dogFoodAutomationState.nextCheckAt = 0;
+                return finish('skipped', message);
+            }
+            dogFoodFailures++;
+            dogFoodAutomationState.nextCheckAt = getServerTimeSec() + Math.min(900, 60 * 2 ** Math.min(dogFoodFailures - 1, 4));
+            logWarn('宠物', `自动喂狗粮暂缓：${message}`, {
+                module: 'dog',
+                event: '自动喂狗粮',
+                result: 'error',
+            });
+            return finish('error', message);
+        }
+    });
+    dogFoodTail = result.catch(() => {});
+    return result;
+}
 
 function normalizeId(value: any): number {
     return Math.max(0, toNum(value));
@@ -271,7 +370,7 @@ async function getPetInfo(): Promise<any> {
     // GetDogInfo.field 5 只提供狗粮种类、时长及状态。抓包已证明 field 3
     // 不是数量，因此必须读取背包才能展示与校验真实库存。
     const bagReply = await getBag();
-    return buildPetSnapshot(reply, bagReply);
+    return { ...buildPetSnapshot(reply, bagReply), automation: getDogFoodAutomationState() };
 }
 
 async function activateDog(dogIdInput: any): Promise<any> {
@@ -335,10 +434,11 @@ async function withdrawDog(): Promise<any> {
     return { ...snapshot, operation: { type: 'withdraw', dogId: currentDogId }, reply };
 }
 
-async function useDogFood(itemIdInput: any, countInput: any = 1, uidInput: any = 0): Promise<any> {
+async function useDogFood(itemIdInput: any, countInput: any = 1, uidInput: any = 0, options: any = {}): Promise<any> {
     const itemId = normalizeId(itemIdInput);
     const count = Math.max(1, Math.trunc(normalizeId(countInput) || 1));
     const uid = normalizeId(uidInput);
+    const beforeSend = typeof options?.beforeSend === 'function' ? options.beforeSend : undefined;
     const duration = DOG_FOOD_DURATIONS.get(itemId) || 0;
     if (!duration) throw new Error('该物品不是可用狗粮');
     if (pendingFoodUse) throw new Error('已有狗粮使用请求正在处理，请稍后再试');
@@ -348,6 +448,9 @@ async function useDogFood(itemIdInput: any, countInput: any = 1, uidInput: any =
         const currentDuration = getProtectDuration(before);
         const requestedDuration = duration * count;
         const maxProtectDuration = getMaxProtectDuration(before);
+        if (options?.onlyWhenProtectAtMost !== undefined && currentDuration > Number(options.onlyWhenProtectAtMost)) {
+            throw new Error('狗粮剩余时间已变化，本次自动喂食已跳过');
+        }
         if (currentDuration + requestedDuration > maxProtectDuration) {
             const remaining = Math.max(0, maxProtectDuration - currentDuration);
             throw new Error(`狗粮使用后将超过 30 天上限，当前最多还可增加 ${Math.floor(remaining / 86400)} 天`);
@@ -358,13 +461,14 @@ async function useDogFood(itemIdInput: any, countInput: any = 1, uidInput: any =
         if (available < count) {
             throw new Error(`狗粮可用数量不足：需要 ${count}，当前 ${available}`);
         }
+        if (beforeSend && !beforeSend()) throw new Error('自动喂狗已停止');
 
         // 真实抓包：DogService.AddFood({ field 1: item_id, field 2: count })；
         // 不能走背包 ItemService.Use，否则与游戏狗盆行为不一致。
         const body: Uint8Array = types.AddFoodRequest.encode(
             types.AddFoodRequest.create({ item_id: itemId, count }),
         ).finish();
-        const { body: replyBody } = await sendMsgAsync('gamepb.dogpb.DogService', 'AddFood', body);
+        const { body: replyBody } = await sendMsgAsync('gamepb.dogpb.DogService', 'AddFood', body, { beforeSend });
         const reply = types.AddFoodReply.decode(replyBody);
         const confirmedDuration = getProtectDuration(reply);
         if (confirmedDuration <= currentDuration) {
@@ -388,13 +492,16 @@ async function useDogFood(itemIdInput: any, countInput: any = 1, uidInput: any =
     try {
         return await request;
     } catch (error: any) {
-        logWarn('宠物', `使用狗粮失败: ${error?.message || error}`, {
-            module: 'dog',
-            event: '使用狗粮',
-            result: 'error',
-            itemId,
-            count,
-        });
+        const message = String(error?.message || error);
+        if (!message.includes('已跳过') && !message.includes('已停止')) {
+            logWarn('宠物', `使用狗粮失败: ${message}`, {
+                module: 'dog',
+                event: '使用狗粮',
+                result: 'error',
+                itemId,
+                count,
+            });
+        }
         throw error;
     } finally {
         if (pendingFoodUse === request) pendingFoodUse = null;
@@ -410,6 +517,8 @@ module.exports = {
     deployDog,
     withdrawDog,
     useDogFood,
+    runDogFoodAutomation,
+    getDogFoodAutomationState,
     getProtectLogs,
     getPetSkillCatalog,
     buildPetSnapshot,

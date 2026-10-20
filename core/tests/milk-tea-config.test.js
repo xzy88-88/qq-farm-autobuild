@@ -7,6 +7,8 @@ test('milk tea automation is opt-in and remains isolated per account across conf
     const defaults = normalizeAccountConfig({}).automation;
     assert.equal(defaults.milk_tea_auto_upgrade, false);
     assert.equal(defaults.milk_tea_auto_craft, false);
+    assert.equal(defaults.milk_tea_auto_hire, false);
+    assert.equal(defaults.dog_auto_feed, false);
     try {
         const first = applyConfigSnapshot({ automation: { milk_tea_auto_upgrade: true, milk_tea_auto_craft: true } }, { accountId: '__milk_a', persist: false });
         applyConfigSnapshot({ automation: { milk_tea_auto_upgrade: false, milk_tea_auto_craft: false } }, { accountId: '__milk_b', persist: false });

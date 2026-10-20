@@ -50,6 +50,8 @@ const DEFAULT_ACCOUNT_CONFIG: AccountConfig = {
         land_upgrade: true,
         milk_tea_auto_upgrade: false,
         milk_tea_auto_craft: false,
+        milk_tea_auto_hire: false,
+        dog_auto_feed: false,
         friend: true,
         friend_auto_accept: true,
         friend_help_exp_limit: true,

@@ -410,6 +410,7 @@ async function runStartupSequence(canContinue: () => boolean = () => loginReady)
         startDailyRoutineTimer(false);
         startMysteryShopTimer();
         startMilkTeaTimer();
+        startDogFeedTimer();
     } catch (e: any) {
         log('系统', `登录启动序列执行失败: ${e.message}`, { module: 'system', event: '启动序列', result: 'error' });
     }
@@ -445,7 +446,7 @@ function startMilkTeaTimer(): void {
     workerScheduler.clear('milk_tea_initial');
     workerScheduler.clear('milk_tea_interval');
     const auto = getAutomation();
-    if (!loginReady || !(auto.milk_tea_auto_upgrade || auto.milk_tea_auto_craft)) return;
+    if (!loginReady || !(auto.milk_tea_auto_upgrade || auto.milk_tea_auto_craft || auto.milk_tea_auto_hire)) return;
     const generation = runtimeGeneration;
     const canContinue = () => loginReady && generation === runtimeGeneration;
     const tick = () => runExclusiveAutomationTask('milk_tea', () => {
@@ -454,6 +455,21 @@ function startMilkTeaTimer(): void {
     });
     workerScheduler.setTimeoutTask('milk_tea_initial', 5000, tick);
     workerScheduler.setIntervalTask('milk_tea_interval', 60000, tick);
+}
+
+function startDogFeedTimer(): void {
+    workerScheduler.clear('dog_feed_initial');
+    workerScheduler.clear('dog_feed_interval');
+    const auto = getAutomation();
+    if (!loginReady || !auto.dog_auto_feed) return;
+    const generation = runtimeGeneration;
+    const canContinue = () => loginReady && generation === runtimeGeneration;
+    const tick = () => runExclusiveAutomationTask('dog_feed', () => {
+        if (!canContinue()) return;
+        return runWithRequestClass('background', () => require('../services/pets').runDogFoodAutomation(canContinue));
+    });
+    workerScheduler.setTimeoutTask('dog_feed_initial', 8000, tick);
+    workerScheduler.setIntervalTask('dog_feed_interval', 60000, tick);
 }
 
 function applyRuntimeConfig(snapshot: any, syncNow: boolean = false): number {
@@ -515,6 +531,7 @@ function applyRuntimeConfig(snapshot: any, syncNow: boolean = false): number {
 
             startMysteryShopTimer();
             startMilkTeaTimer();
+            startDogFeedTimer();
         }
     }
 
