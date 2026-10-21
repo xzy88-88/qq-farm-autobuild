@@ -1,0 +1,994 @@
+diff --git a/core/src/core/worker.ts b/core/src/core/worker.ts
+index c01573a..407825d 100644
+--- a/core/src/core/worker.ts
++++ b/core/src/core/worker.ts
+@@ -409,6 +409,7 @@ async function runStartupSequence(canContinue: () => boolean = () => loginReady)
+         startUnifiedScheduler();
+         startDailyRoutineTimer(false);
+         startMysteryShopTimer();
++        startMilkTeaTimer();
+     } catch (e: any) {
+         log('系统', `登录启动序列执行失败: ${e.message}`, { module: 'system', event: '启动序列', result: 'error' });
+     }
+@@ -440,6 +441,21 @@ function startMysteryShopTimer(): void {
+     });
+ }
+ 
++function startMilkTeaTimer(): void {
++    workerScheduler.clear('milk_tea_initial');
++    workerScheduler.clear('milk_tea_interval');
++    const auto = getAutomation();
++    if (!loginReady || !(auto.milk_tea_auto_upgrade || auto.milk_tea_auto_craft)) return;
++    const generation = runtimeGeneration;
++    const canContinue = () => loginReady && generation === runtimeGeneration;
++    const tick = () => runExclusiveAutomationTask('milk_tea', () => {
++        if (!canContinue()) return;
++        return runWithRequestClass('background', () => require('../services/milk-tea').runMilkTeaAutomation(canContinue));
++    });
++    workerScheduler.setTimeoutTask('milk_tea_initial', 5000, tick);
++    workerScheduler.setIntervalTask('milk_tea_interval', 60000, tick);
++}
++
+ function applyRuntimeConfig(snapshot: any, syncNow: boolean = false): number {
+     const rev = Number((snapshot || {}).__revision || 0);
+     if (rev > 0 && rev < appliedConfigRevision) {
+@@ -498,6 +514,7 @@ function applyRuntimeConfig(snapshot: any, syncNow: boolean = false): number {
+             }
+ 
+             startMysteryShopTimer();
++            startMilkTeaTimer();
+         }
+     }
+ 
+diff --git a/core/src/models/store/shared-state.ts b/core/src/models/store/shared-state.ts
+index e81e389..ee78382 100644
+--- a/core/src/models/store/shared-state.ts
++++ b/core/src/models/store/shared-state.ts
+@@ -48,6 +48,8 @@ const DEFAULT_ACCOUNT_CONFIG: AccountConfig = {
+         farm: true,
+         farm_push: true,
+         land_upgrade: true,
++        milk_tea_auto_upgrade: false,
++        milk_tea_auto_craft: false,
+         friend: true,
+         friend_auto_accept: true,
+         friend_help_exp_limit: true,
+diff --git a/core/src/services/milk-tea.ts b/core/src/services/milk-tea.ts
+index 00ecdd2..4e9ec33 100644
+--- a/core/src/services/milk-tea.ts
++++ b/core/src/services/milk-tea.ts
+@@ -10,6 +10,8 @@ const { getItemById, getItemImageById } = require('../config/gameConfig');
+ const warehouse = require('./warehouse');
+ const { getDiamondBalance } = require('./pay');
+ const { util } = require('protobufjs');
++const { performance } = require('node:perf_hooks');
++const MATERIAL_SNAPSHOT_TTL_MS = 15000;
+ const GROUP = '2026110100';
+ const MILK = '2026110101';
+ const SHOP = '2026110102';
+@@ -29,6 +31,75 @@ const operations: Record<string, [number, string, string]> = {
+ };
+ const readActions = new Set(['shop', 'hireList', 'workshop', 'work', 'rank', 'logs']);
+ let tail: Promise<any> = Promise.resolve();
++let automationFailures = 0;
++const automationState = { status: 'idle', message: '等待后台检查', lastCheckAt: 0, nextCheckAt: 0, upgraded: false, craftedCups: 0 };
++
++function getMilkTeaAutomationState() {
++    const flags = require('../models/store').getAutomation();
++    const enabled = !!(flags.milk_tea_auto_upgrade || flags.milk_tea_auto_craft);
++    return { ...automationState, autoUpgrade: !!flags.milk_tea_auto_upgrade, autoCraft: !!flags.milk_tea_auto_craft,
++        ...(!enabled ? { status: 'disabled', message: '奶茶自动化已关闭' } : {}) };
++}
++
++function runMilkTeaAutomation(canContinue: () => boolean = () => true) {
++    const result = tail.then(async () => {
++        const flags = () => require('../models/store').getAutomation();
++        const enabled = () => canContinue() && !!(flags().milk_tea_auto_upgrade || flags().milk_tea_auto_craft);
++        const finish = (status: string, message: string) => {
++            Object.assign(automationState, { status, message });
++            return { ...automationState };
++        };
++        if (!enabled()) return finish('disabled', '奶茶自动化已关闭');
++        const now = getServerTimeSec();
++        if (now < automationState.nextCheckAt) return { ...automationState };
++        Object.assign(automationState, { lastCheckAt: now, upgraded: false, craftedCups: 0 });
++        const messages: string[] = [];
++        try {
++            let state = await getMilkTeaActivity(flags().milk_tea_auto_craft ? 'workshop' : 'upgrade', {}, { upgradeOnly: !flags().milk_tea_auto_craft });
++            if (!enabled()) return finish('disabled', '奶茶自动化已关闭');
++            if (!state.active || state.settling || !toNum(state.summary.shop_open_at)) {
++                automationFailures = 0;
++                return finish('skipped', !state.active ? '活动未开放或已结束' : state.settling ? '活动已进入结算期' : '店铺尚未开业');
++            }
++            if (flags().milk_tea_auto_upgrade && state.summary.can_upgrade) {
++                const upgraded = await perform('upgrade', { expectedLevel: Number(state.summary.level), automationGuard: () => canContinue() && flags().milk_tea_auto_upgrade });
++                automationState.upgraded = true;
++                messages.push('店铺升级成功');
++                require('../utils/utils').log('奶茶', '自动升级店铺成功', { module: 'activity', event: '奶茶自动升级', result: 'ok' });
++                if (!upgraded.activity) return finish('success', '店铺升级成功，等待下次检查刷新进度');
++                if (!enabled()) return finish('disabled', '奶茶自动化已关闭');
++                if (flags().milk_tea_auto_craft) state = await getMilkTeaActivity('workshop');
++            }
++            if (canContinue() && flags().milk_tea_auto_craft && !state.recipes) state = await getMilkTeaActivity('workshop');
++            if (canContinue() && flags().milk_tea_auto_craft && state.active && !state.settling) {
++                const unlocked = new Set(state.recipes.filter((recipe: any) => recipe.unlocked).map((recipe: any) => recipe.fruitId));
++                const fruits = state.fruits.filter((fruit: any) => unlocked.has(fruit.id) && !fruit.locked
++                    && !fruit.mutations.some((value: number) => value > 0) && Number.isSafeInteger(fruit.count) && fruit.count > 0)
++                    .slice(0, 200).map((fruit: any) => ({ uid: fruit.uid, count: fruit.count }));
++                if (fruits.length) {
++                    const crafted = await perform('craft', { fruits, ordinaryOnly: true, automationGuard: () => canContinue() && flags().milk_tea_auto_craft });
++                    automationState.craftedCups = Object.values(crafted.result.crafted_cups || {}).reduce<number>((sum, value) => sum + Number(value), 0);
++                    messages.push(`制作奶茶 ${automationState.craftedCups} 杯`);
++                    require('../utils/utils').log('奶茶', `自动制作奶茶 ${automationState.craftedCups} 杯`, {
++                        module: 'activity', event: '奶茶自动制作', result: 'ok', cups: automationState.craftedCups,
++                    });
++                }
++            }
++            automationFailures = 0;
++            automationState.nextCheckAt = 0;
++            return finish(messages.length ? 'success' : 'skipped', messages.join('；') || '未达到升级条件，或暂无可制作的普通果实');
++        } catch (error: any) {
++            if (!enabled()) return finish('disabled', '奶茶自动化已关闭');
++            automationFailures++;
++            automationState.nextCheckAt = getServerTimeSec() + Math.min(900, 60 * 2 ** Math.min(automationFailures - 1, 4));
++            const message = `${messages.length ? `${messages.join('；')}；` : ''}${String(error?.message || '奶茶自动检查失败')}`;
++            require('../utils/utils').log('奶茶', `奶茶自动化暂缓：${message}`, { module: 'activity', event: '奶茶自动化', result: 'error' });
++            return finish('error', message);
++        }
++    });
++    tail = result.catch(() => {});
++    return result;
++}
+ 
+ function fail(message: string): never { throw new Error(message); }
+ function integer(value: any, min = 1, max = Number.MAX_SAFE_INTEGER) {
+@@ -57,10 +128,10 @@ async function group() {
+     if (String(result?.head?.activity_id) !== GROUP) fail('活动目录回包不匹配');
+     return result.children || [];
+ }
+-async function rpc(action: string, params: any = {}) {
++async function rpc(action: string, params: any = {}, beforeSend?: () => boolean) {
+     const [cmd, field, id] = operations[action];
+     const request = { activity_id: id, operate_type: cmd, [field]: params };
+-    const reply = await sendMsgAsync(SERVICE, 'Operate', types.MilkTeaOperateRequest.encode(request).finish());
++    const reply = await sendMsgAsync(SERVICE, 'Operate', types.MilkTeaOperateRequest.encode(request).finish(), { beforeSend });
+     const decoded = types.MilkTeaOperateReply.decode(reply.body);
+     if (String(decoded.activity_id) !== id || toNum(decoded.operate_type) !== cmd || !decoded[field]) {
+         fail('操作回包不完整，请刷新确认结果，勿重复提交');
+@@ -110,7 +181,7 @@ function normalizeGoods(entry: any, settling: boolean) {
+         available: remaining !== 0 && conditions.every((v: any) => v.satisfied) && !(settling && entry.category_tag === 'seed'),
+     };
+ }
+-async function getMilkTeaActivity(page = 'shop', input: any = {}) {
++async function getMilkTeaActivity(page = 'shop', input: any = {}, options: { upgradeOnly?: boolean } = {}) {
+     if (!['shop', 'settings', 'upgrade', 'workshop', 'hireList', 'exchange', 'fund', 'work', 'rank', 'logs'].includes(page)) fail('未知的活动页面');
+     const entries = await group();
+     const entry = entries.find((v: any) => String(v.head?.activity_id) === MILK);
+@@ -121,13 +192,13 @@ async function getMilkTeaActivity(page = 'shop', input: any = {}) {
+     const settling = toNum(head.settle_start_time) > 0 && now >= toNum(head.settle_start_time);
+     const summary = plain(types.MilkTeaGetGroupReply, { group: { children: [entry] } }).group.children[0].milk_tea.summary;
+     const result: any = { id: MILK, title: head.name, serverTime: now, startTime: toNum(head.begin_time), endTime: toNum(head.end_time),
+-        settleStartTime: toNum(head.settle_start_time), active, settling, summary, rules: ruleLines(head), page,
++        settleStartTime: toNum(head.settle_start_time), active, settling, summary, rules: ruleLines(head), page, automation: getMilkTeaAutomationState(),
+         recommendedNames: config.MilkTeaActivityConfig[0].recommend_names.split(';'), levels: config.MilkTeaStoreLevelConfig.map(level => ({
+             ...level, rewards: String(level.rewards || '').split(';').filter(Boolean).map(text => { const [id, count] = text.split(':').map(Number); return item({ id, count }); }),
+             recipes: level.recipe_ids_string.split(';').map(id => recipeConfig(id)?.recipe_name).filter(Boolean),
+         })),
+     };
+-    const inv = await inventory(page === 'fund' || page === 'exchange');
++    const inv = options.upgradeOnly && page === 'upgrade' ? { bag: [], balances: {} } : await inventory(page === 'fund' || page === 'exchange');
+     result.balances = inv.balances;
+     if (page === 'exchange') {
+         const shop = entries.find((v: any) => String(v.head?.activity_id) === SHOP)?.shop;
+@@ -188,7 +259,11 @@ async function perform(action: string, input: any) {
+     if (!Object.hasOwn(operations, action) || readActions.has(action)) fail('未知的活动操作');
+     const page = ['exchange'].includes(action) ? 'exchange' : ['unlock', 'fundClaim'].includes(action) ? 'fund'
+         : ['hire'].includes(action) ? 'hireList' : action === 'craft' ? 'workshop' : ['wages', 'interact'].includes(action) ? 'work' : ['rename', 'hireSetting'].includes(action) ? 'settings' : action === 'upgrade' ? 'upgrade' : 'shop';
+-    const state = await getMilkTeaActivity(page, input);
++    // Capture before the asynchronous reads so an overlapping lock operation invalidates the snapshot.
++    const materialLockState = action === 'craft' ? warehouse.getItemLockState() : null;
++    const materialCheckStartedAt = performance.now();
++    const automatedUpgrade = action === 'upgrade' && !!input.automationGuard;
++    const state = await getMilkTeaActivity(page, input, { upgradeOnly: automatedUpgrade });
+     if (!state.active) fail('活动尚未开放或已经结束');
+     if (action !== 'create' && !toNum(state.summary.shop_open_at)) fail('请先开业');
+     if (state.settling && ['create', 'rename', 'hire', 'boost', 'interact', 'craft'].includes(action)) fail('结算期不可进行此操作');
+@@ -219,6 +294,7 @@ async function perform(action: string, input: any) {
+             ids.add(uid);
+             const fruit = state.fruits.find((v: any) => v.uid === uid);
+             if (!fruit || fruit.locked || fruit.count !== integer(selected.count)) fail('果实数量或锁定状态已变化，请重新选择');
++            if (input.ordinaryOnly && fruit.mutations.some((value: number) => value > 0)) fail('果实变异状态已变化，本次自动制作已跳过');
+         }
+         params = { fruit_uids: [...ids] };
+     } else if (action === 'hire') {
+@@ -256,7 +332,18 @@ async function perform(action: string, input: any) {
+         if (typeof input.disabled !== 'boolean') fail('雇佣设置无效');
+         params = { hire_disabled: input.disabled };
+     }
+-    const reply = await rpc(action, params);
++    const beforeSend = input.automationGuard || materialLockState ? () => {
++        if (input.automationGuard && (!input.automationGuard() || getServerTimeSec() >= state.endTime
++            || (state.settleStartTime > 0 && getServerTimeSec() >= state.settleStartTime))) return false;
++        if (materialLockState) {
++            const currentLocks = warehouse.getItemLockState();
++            if (materialLockState.pending || currentLocks.pending || currentLocks.revision !== materialLockState.revision
++                || performance.now() - materialCheckStartedAt > MATERIAL_SNAPSHOT_TTL_MS) return false;
++        }
++        return true;
++    } : undefined;
++    if (beforeSend && !beforeSend()) fail('任务已停止、活动进入结算期或材料状态已变化，请刷新后重试');
++    const reply = await rpc(action, params, beforeSend);
+     const field = operations[action][1];
+     const result = plain(types.MilkTeaOperateReply, { [field]: reply })[field];
+     if (action === 'craft') {
+@@ -266,7 +353,7 @@ async function perform(action: string, input: any) {
+     if (action === 'hire' && !reply.results?.some((v: any) => v.success)) fail(reply.results?.[0]?.error_msg || '雇佣未成功，请刷新确认');
+     const rewards = items(reply.awards || reply.items || reply.rewards || reply.opening_gift || reply.items_gained);
+     if (action === 'boost') rewards.push(...items([{ id: 1041, count: reply.token_gain }, { id: 1001, count: reply.coin_gain }]).filter(v => v.count > 0));
+-    try { return { activity: await getMilkTeaActivity(page, input), result, rewards }; }
++    try { return { activity: await getMilkTeaActivity(page, input, { upgradeOnly: automatedUpgrade }), result, rewards }; }
+     catch { return { activity: null, result, rewards, refreshRequired: true }; }
+ }
+ 
+@@ -276,4 +363,4 @@ function operateMilkTeaActivity(action: string, input: any = {}) {
+     return result;
+ }
+ 
+-module.exports = { getMilkTeaActivity, operateMilkTeaActivity };
++module.exports = { getMilkTeaActivity, operateMilkTeaActivity, runMilkTeaAutomation, getMilkTeaAutomationState };
+diff --git a/core/src/services/warehouse.ts b/core/src/services/warehouse.ts
+index 4caa02a..c8f41cb 100644
+--- a/core/src/services/warehouse.ts
++++ b/core/src/services/warehouse.ts
+@@ -15,6 +15,7 @@ const { updateStatusGold } = require('./status');
+ 
+ const SELL_BATCH_SIZE: number = 15;
+ const LOCKABLE_ITEM_TYPES: Set<number> = new Set([17, 6, 5]);
++const itemLockState = { revision: 0, pending: 0 };
+ const FERTILIZER_RELATED_IDS: Set<number> = new Set([
+     100003, // 化肥礼包
+     100004, // 有机化肥礼包
+@@ -162,6 +163,10 @@ function isItemLocked(item: any): boolean {
+     return item?.locked === true || item?.locked === 1 || item?.locked === '1';
+ }
+ 
++function getItemLockState(): { revision: number; pending: number } {
++    return { ...itemLockState };
++}
++
+ function isLockableItem(item: any): boolean {
+     const id: number = toNum(item?.id);
+     const info: any = id > 0 ? getItemById(id) : null;
+@@ -178,41 +183,48 @@ async function setItemsLocked(itemUids: any[], locked: boolean): Promise<any> {
+     const requestedUids: number[] = normalizeItemUids(itemUids);
+     if (requestedUids.length === 0) throw new Error('缺少物品 UID');
+ 
+-    const bagItems: any[] = getBagItems(await getBag());
+-    const byUid: Map<number, any> = new Map(
+-        bagItems
+-            .filter((item: any) => toNum(item?.uid) > 0)
+-            .map((item: any) => [toNum(item.uid), item]),
+-    );
+-    const actionableUids: number[] = [];
+-    for (const uid of requestedUids) {
+-        const item: any = byUid.get(uid);
+-        if (!item) throw new Error(`背包中未找到 UID ${uid}`);
+-        const info: any = getItemById(toNum(item.id));
+-        if (!isLockableItem(item)) {
+-            throw new Error(`${info?.name || `物品${toNum(item.id)}`}不支持锁定`);
++    itemLockState.revision++;
++    itemLockState.pending++;
++    try {
++        const bagItems: any[] = getBagItems(await getBag());
++        const byUid: Map<number, any> = new Map(
++            bagItems
++                .filter((item: any) => toNum(item?.uid) > 0)
++                .map((item: any) => [toNum(item.uid), item]),
++        );
++        const actionableUids: number[] = [];
++        for (const uid of requestedUids) {
++            const item: any = byUid.get(uid);
++            if (!item) throw new Error(`背包中未找到 UID ${uid}`);
++            const info: any = getItemById(toNum(item.id));
++            if (!isLockableItem(item)) {
++                throw new Error(`${info?.name || `物品${toNum(item.id)}`}不支持锁定`);
++            }
++            if (isItemLocked(item) !== locked) actionableUids.push(uid);
+         }
+-        if (isItemLocked(item) !== locked) actionableUids.push(uid);
+-    }
+ 
+-    if (actionableUids.length === 0) {
+-        return { locked, changed: 0, itemUids: [] };
+-    }
++        if (actionableUids.length === 0) {
++            return { locked, changed: 0, itemUids: [] };
++        }
+ 
+-    const RequestType: any = locked ? types.LockItemsRequest : types.UnlockItemsRequest;
+-    const ReplyType: any = locked ? types.LockItemsReply : types.UnlockItemsReply;
+-    const method: string = locked ? 'LockItems' : 'UnlockItems';
+-    const body: Uint8Array = RequestType.encode(RequestType.create({
+-        item_uids: actionableUids.map((uid: number) => toLong(uid)),
+-    })).finish();
+-    const { body: replyBody } = await sendMsgAsync('gamepb.itempb.ItemService', method, body);
+-    const reply: any = ReplyType.decode(replyBody);
+-    const confirmedUids: number[] = normalizeItemUids(reply?.item_uids);
+-    return {
+-        locked,
+-        changed: confirmedUids.length || actionableUids.length,
+-        itemUids: confirmedUids.length > 0 ? confirmedUids : actionableUids,
+-    };
++        const RequestType: any = locked ? types.LockItemsRequest : types.UnlockItemsRequest;
++        const ReplyType: any = locked ? types.LockItemsReply : types.UnlockItemsReply;
++        const method: string = locked ? 'LockItems' : 'UnlockItems';
++        const body: Uint8Array = RequestType.encode(RequestType.create({
++            item_uids: actionableUids.map((uid: number) => toLong(uid)),
++        })).finish();
++        const { body: replyBody } = await sendMsgAsync('gamepb.itempb.ItemService', method, body);
++        const reply: any = ReplyType.decode(replyBody);
++        const confirmedUids: number[] = normalizeItemUids(reply?.item_uids);
++        return {
++            locked,
++            changed: confirmedUids.length || actionableUids.length,
++            itemUids: confirmedUids.length > 0 ? confirmedUids : actionableUids,
++        };
++    } finally {
++        itemLockState.pending--;
++        itemLockState.revision++;
++    }
+ }
+ 
+ function getItemExpireTime(item: any): number {
+@@ -824,4 +836,5 @@ module.exports = {
+     getContainerHoursFromBagItems,
+     setItemsLocked,
+     isItemLocked,
++    getItemLockState,
+ };
+diff --git a/core/src/types/config.ts b/core/src/types/config.ts
+index 9902df9..fbbade5 100644
+--- a/core/src/types/config.ts
++++ b/core/src/types/config.ts
+@@ -18,6 +18,8 @@ export interface AutomationConfig {
+   farm: boolean;
+   farm_push: boolean;
+   land_upgrade: boolean;
++  milk_tea_auto_upgrade: boolean;
++  milk_tea_auto_craft: boolean;
+   friend: boolean;
+   friend_auto_accept: boolean;
+   friend_help_exp_limit: boolean;
+diff --git a/core/src/utils/network.ts b/core/src/utils/network.ts
+index 8cad47b..46dff86 100644
+--- a/core/src/utils/network.ts
++++ b/core/src/utils/network.ts
+@@ -53,6 +53,8 @@ interface ConnectionContext {
+ }
+ 
+ interface SendMsgOptions {
++    /** 在异步编码完成、实际写入 socket 前复核消耗任务是否仍然有效。 */
++    beforeSend?: () => boolean;
+     timeoutMs?: number;
+     expectedErrorCodes?: readonly number[];
+     /** 兼容旧调用：high→critical、low→background、normal 视为「未表态」交给环境班次。 */
+@@ -74,6 +76,7 @@ interface PendingRequest {
+ }
+ 
+ interface QueuedRequest {
++    beforeSend?: () => boolean;
+     context: ConnectionContext;
+     serviceName: string;
+     methodName: string;
+@@ -259,7 +262,7 @@ function drainRequestQueue(): void {
+                 drainRequestQueue();
+             },
+         } : undefined;
+-        sendMsg(request.context, request.serviceName, request.methodName, request.bodyBytes, pending).then((sent) => {
++        sendMsg(request.context, request.serviceName, request.methodName, request.bodyBytes, pending, request.beforeSend).then((sent) => {
+             if (sent) {
+                 if (!request.expectReply) {
+                     settleQueuedRequest(request, undefined, { body: Buffer.alloc(0), meta: {} });
+@@ -389,7 +392,7 @@ function isCurrentConnection(context: ConnectionContext): boolean {
+     return currentConnection === context && ws === context.socket && !context.finalized;
+ }
+ 
+-async function sendMsg(context: ConnectionContext, serviceName: string, methodName: string, bodyBytes: Buffer, pending?: PendingRequest): Promise<boolean> {
++async function sendMsg(context: ConnectionContext, serviceName: string, methodName: string, bodyBytes: Buffer, pending?: PendingRequest, beforeSend?: () => boolean): Promise<boolean> {
+     if (!isCurrentConnection(context) || context.socket.readyState !== WebSocket.OPEN) {
+         log('系统', '[WS] 连接未打开');
+         return false;
+@@ -399,6 +402,7 @@ async function sendMsg(context: ConnectionContext, serviceName: string, methodNa
+     // 加密前登记在途请求，确保排队器能准确计算并发槽位。
+     if (pending) pendingCallbacks.set(seq, pending);
+     const encoded = await encodeMsg(serviceName, methodName, bodyBytes, seq);
++    if (beforeSend && !beforeSend()) throw new Error(`请求已取消: ${methodName}`);
+     if (pending && pendingCallbacks.get(seq) !== pending) return false;
+     if (!isCurrentConnection(context) || context.socket.readyState !== WebSocket.OPEN) {
+         if (pending) {
+@@ -457,6 +461,7 @@ function sendMsgAsync(serviceName: string, methodName: string, bodyBytes: Buffer
+ 
+         const requestId = nextRequestId++;
+         const request: QueuedRequest = {
++            beforeSend: options.beforeSend,
+             context,
+             serviceName,
+             methodName,
+diff --git a/core/tests/milk-tea-config.test.js b/core/tests/milk-tea-config.test.js
+new file mode 100644
+index 0000000..9830d4c
+--- /dev/null
++++ b/core/tests/milk-tea-config.test.js
+@@ -0,0 +1,20 @@
++const test = require('node:test');
++const assert = require('node:assert/strict');
++const { normalizeAccountConfig, globalConfig } = require('../dist/models/store/shared-state');
++const { applyConfigSnapshot } = require('../dist/models/store/account-config');
++
++test('milk tea automation is opt-in and remains isolated per account across config round trips', () => {
++    const defaults = normalizeAccountConfig({}).automation;
++    assert.equal(defaults.milk_tea_auto_upgrade, false);
++    assert.equal(defaults.milk_tea_auto_craft, false);
++    try {
++        const first = applyConfigSnapshot({ automation: { milk_tea_auto_upgrade: true, milk_tea_auto_craft: true } }, { accountId: '__milk_a', persist: false });
++        applyConfigSnapshot({ automation: { milk_tea_auto_upgrade: false, milk_tea_auto_craft: false } }, { accountId: '__milk_b', persist: false });
++        assert.equal(first.automation.milk_tea_auto_craft, true);
++        assert.equal(normalizeAccountConfig(globalConfig.accountConfigs.__milk_a).automation.milk_tea_auto_upgrade, true);
++        assert.equal(normalizeAccountConfig(globalConfig.accountConfigs.__milk_b).automation.milk_tea_auto_craft, false);
++    } finally {
++        delete globalConfig.accountConfigs.__milk_a;
++        delete globalConfig.accountConfigs.__milk_b;
++    }
++});
+diff --git a/core/tests/milk-tea-scheduler.test.js b/core/tests/milk-tea-scheduler.test.js
+new file mode 100644
+index 0000000..01a0d72
+--- /dev/null
++++ b/core/tests/milk-tea-scheduler.test.js
+@@ -0,0 +1,57 @@
++const test = require('node:test');
++const assert = require('node:assert/strict');
++const fs = require('node:fs');
++const vm = require('node:vm');
++const path = require('node:path');
++
++function harness() {
++    const timers = new Map();
++    const calls = [];
++    const flags = { milk_tea_auto_craft: true };
++    const noop = () => {};
++    const generic = new Proxy({}, { get: (_target, key) => key === 'CONFIG' ? {} : noop });
++    const overrides = {
++        'node:worker_threads': { parentPort: null, workerData: null },
++        '../models/store': { getAutomation: () => flags },
++        '../services/scheduler': { createScheduler: () => ({
++            clear: name => timers.delete(name),
++            setTimeoutTask: (name, delay, run) => timers.set(name, { delay, run }),
++            setIntervalTask: (name, delay, run) => timers.set(name, { delay, run }),
++        }) },
++        '../services/automation-lock': { runExclusiveAutomationTask: async (_name, run) => run() },
++        '../utils/request-context': { runWithRequestClass: (requestClass, run) => { calls.push(requestClass); return run(); } },
++        '../services/milk-tea': { runMilkTeaAutomation: guard => { if (guard()) calls.push('milk'); } },
++    };
++    const box = { exports: {} };
++    const source = fs.readFileSync(path.join(__dirname, '../dist/core/worker.js'), 'utf8');
++    vm.runInNewContext(source + `
++      module.exports = {
++        start: typeof startMilkTeaTimer === 'function' ? startMilkTeaTimer : () => {},
++        login: ready => { loginReady = ready; runtimeGeneration++; },
++      };
++    `, { require: name => overrides[name] || generic, module: box, exports: box.exports,
++        process: { env: {} }, console, Buffer, Date, setTimeout, clearTimeout });
++    return { api: box.exports, timers, calls, flags };
++}
++
++test('milk tea timer starts only for logged-in enabled accounts and uses the background request class', async () => {
++    const h = harness();
++    h.api.start();
++    assert.equal(h.timers.size, 0);
++    h.api.login(true); h.api.start();
++    assert.equal(h.timers.get('milk_tea_interval')?.delay, 60000);
++    await h.timers.get('milk_tea_initial').run();
++    assert.deepEqual(h.calls, ['background', 'milk']);
++    h.flags.milk_tea_auto_craft = false; h.api.start();
++    assert.equal(h.timers.size, 0);
++});
++
++test('a callback from an old login generation cannot run milk tea actions', async () => {
++    const h = harness();
++    h.api.login(true); h.api.start();
++    const run = h.timers.get('milk_tea_initial')?.run;
++    assert.equal(typeof run, 'function');
++    h.api.login(false); h.api.login(true);
++    await run();
++    assert.deepEqual(h.calls, []);
++});
+diff --git a/core/tests/milk-tea.test.js b/core/tests/milk-tea.test.js
+index 11b8de0..941b8e9 100644
+--- a/core/tests/milk-tea.test.js
++++ b/core/tests/milk-tea.test.js
+@@ -8,9 +8,16 @@ const encode = (type, data) => Buffer.from(type.encode(type.fromObject(data)).fi
+ 
+ function harness() {
+     const calls = [];
++    const logs = [];
++    const automation = { milk_tea_auto_upgrade: false, milk_tea_auto_craft: false };
++    let reads = 0;
++    let bagReads = 0;
++    let onBagRead = () => {};
++    let onDispatch = () => {};
+     let now = 1792032000;
+     let failRefresh = false;
+     let writes = 0;
++    const lockState = { revision: 0, pending: 0 };
+     const milk = { head: { activity_id: '2026110101', name: '奶茶热销中', begin_time: 1792029600, end_time: 1794844799, settle_start_time: 1794671999 }, milk_tea: { summary: { shop_open_at: 1792030000, shop_name: '测试店铺', level: 1, total_revenue: 500 } } };
+     const goods = { id: 301, item: [{ id: 20525, count: 1 }], cost: [{ id: 1001, count: 10000 }], purchase_limit: 108, purchased_count: 2, category_tag: 'seed', cond_hints: [] };
+     const fund = { unlocked: false, unlock_cost: [{ id: 1004, count: 360 }], tiers: [{ tier_id: 1, state: 2, reward: [{ id: 1002, count: 288 }] }] };
+@@ -21,17 +28,22 @@ function harness() {
+     Object.assign(fields, { 54: 'milk_tea_rename_shop', 61: 'milk_tea_upgrade', 68: 'milk_tea_set_hire_disable', 65: 'milk_tea_interact' });
+     const mock = (name, exports) => { const id = require.resolve(`../dist/${name}`); require.cache[id] = { id, filename: id, loaded: true, exports }; };
+     mock('utils/proto', { types });
+-    mock('utils/utils', { toNum: v => Number(v) || 0, getServerTimeSec: () => now });
++    mock('utils/utils', { toNum: v => Number(v) || 0, getServerTimeSec: () => now, log: (...args) => logs.push(args) });
++    mock('models/store', { getAutomation: () => ({ ...automation }) });
+     mock('config/gameConfig', { getItemById: id => ({ name: `物品${id}` }), getItemImageById: () => '' });
+     mock('services/pay', { getDiamondBalance: async () => 767 });
+-    mock('services/warehouse', { getBag: async () => ({ items: bag }), getBagItems: b => b.items, isItemLocked: v => !!v.locked });
+-    mock('utils/network', { sendMsgAsync: async (_service, method, body) => {
++    mock('services/warehouse', { getBag: async () => { onBagRead(++bagReads); return { items: bag }; }, getBagItems: b => b.items, isItemLocked: v => !!v.locked,
++        getItemLockState: () => ({ ...lockState }) });
++    mock('utils/network', { sendMsgAsync: async (_service, method, body, options = {}) => {
+         if (method === 'GetGroup') {
++            reads++;
+             if (failRefresh && writes) throw new Error('offline');
+             return { body: encode(types.MilkTeaGetGroupReply, { group: { head: { activity_id: '2026110100' }, children: [milk, { head: { activity_id: '2026110102' }, shop: { goods: [goods] } }, { head: { activity_id: '2026110103' }, growth_fund: fund }] } }) };
+         }
+         const req = types.MilkTeaOperateRequest.toObject(types.MilkTeaOperateRequest.decode(body), { longs: String });
+         const cmd = Number(req.operate_type);
++        await onDispatch(cmd);
++        if (options.beforeSend && !options.beforeSend()) throw new Error('请求已取消');
+         let result;
+         if (cmd === 55) result = { shop };
+         else if (cmd === 58) result = { recipes: [{ recipe_id: 2, recipe_name: '甜莓奶茶', unlocked: true, is_advanced: true, stock_cups: 10 }] };
+@@ -43,15 +55,196 @@ function harness() {
+             else if (cmd === 75) { fund.unlocked = true; result = {}; }
+             else if (cmd === 76) { fund.tiers[0].state = 3; result = { claimed_tier_ids: [1], awards: [{ id: 1002, count: 288 }] }; }
+             else if (cmd === 57) result = { results: [{ success: false, error_code: 1, error_msg: '员工状态已变化' }] };
+-            else if (cmd === 62) result = { crafted_cups: { 2: 20 }, drink_cups: { 2: 30 }, used_fruits: [bag[3]] };
++            else if (cmd === 62) { result = { crafted_cups: { 2: 20 }, drink_cups: { 2: 30 }, used_fruits: [bag[3]] }; bag[3].count = 0; }
++            else if (cmd === 61) { milk.milk_tea.summary.level++; milk.milk_tea.summary.can_upgrade = false; shop.level++; result = {}; }
+             else result = { awards: [{ id: 20525, count: 1 }] };
+         }
+         return { body: encode(types.MilkTeaOperateReply, { activity_id: req.activity_id, operate_type: cmd, [fields[cmd]]: result }) };
+     } });
+     const id = require.resolve('../dist/services/milk-tea'); delete require.cache[id];
+-    return { service: require(id), calls, bag, shop, fund, goods, work, summary: milk.milk_tea.summary, setTime: v => now = v, failRefresh: () => failRefresh = true };
++    return { service: require(id), calls, bag, shop, fund, goods, work, logs, automation, summary: milk.milk_tea.summary, get reads() { return reads; }, get bagReads() { return bagReads; }, onBagRead: fn => onBagRead = fn, onDispatch: fn => onDispatch = fn, setTime: v => now = v, failRefresh: () => failRefresh = true,
++        beginLockChange: () => { lockState.revision++; lockState.pending++; return () => { lockState.pending--; lockState.revision++; }; } };
+ }
+ 
++test('automatic upgrade succeeds without inventory or workshop availability', async () => {
++    const h = harness(); h.automation.milk_tea_auto_upgrade = true; h.summary.can_upgrade = true;
++    h.onBagRead(() => { throw new Error('inventory unavailable'); });
++    h.onDispatch(cmd => { if (cmd === 58) throw new Error('workshop unavailable'); });
++    const result = await h.service.runMilkTeaAutomation();
++    assert.equal(result.upgraded, true);
++    assert.deepEqual(h.calls.map(v => Number(v.operate_type)), [61]);
++    assert.equal(h.bagReads, 0);
++});
++
++test('upgrade-only idle checks do not read crafting inventory', async () => {
++    const h = harness(); h.automation.milk_tea_auto_upgrade = true;
++    await h.service.runMilkTeaAutomation();
++    assert.equal(h.bagReads, 0);
++});
++
++test('enabling crafting during an upgrade-only read fetches the missing workshop state', async () => {
++    const h = harness(); h.automation.milk_tea_auto_upgrade = true;
++    h.onDispatch(cmd => { if (cmd === 55) h.automation.milk_tea_auto_craft = true; });
++    const result = await h.service.runMilkTeaAutomation();
++    assert.equal(result.craftedCups, 20);
++    assert.deepEqual(h.calls.map(v => Number(v.operate_type)), [62]);
++});
++
++test('a lock change after final inventory read cancels automatic and manual crafting', async () => {
++    for (const automatic of [true, false]) {
++        const h = harness(); h.automation.milk_tea_auto_craft = true;
++        h.onDispatch(cmd => { if (cmd === 62) h.beginLockChange()(); });
++        const result = automatic ? h.service.runMilkTeaAutomation()
++            : h.service.operateMilkTeaActivity('craft', { fruits: [{ uid: '900', count: 20 }] });
++        if (automatic) assert.equal((await result).status, 'error');
++        else await assert.rejects(result, /停止|变化|取消/);
++        assert.equal(h.calls.length, 0);
++        assert.equal(h.bag[3].count, 20);
++    }
++});
++
++test('a lock operation pending before the final snapshot blocks crafting', async () => {
++    const h = harness(); h.automation.milk_tea_auto_craft = true;
++    const finish = h.beginLockChange();
++    await h.service.runMilkTeaAutomation();
++    assert.equal(h.calls.length, 0);
++    finish();
++});
++
++test('crafting does not send a snapshot queued for more than fifteen seconds', async (t) => {
++    let mono = 100;
++    t.mock.method(require('node:perf_hooks').performance, 'now', () => mono);
++    const h = harness(); h.automation.milk_tea_auto_craft = true;
++    h.onDispatch(cmd => { if (cmd === 62) mono += 15001; });
++    const result = await h.service.runMilkTeaAutomation();
++    assert.equal(result.status, 'error');
++    assert.equal(h.calls.length, 0);
++});
++
++test('milk tea queued writes cancel on switch changes and settlement before actual dispatch', async () => {
++    for (const action of ['craft', 'upgrade']) {
++        for (const change of ['disabled', 'settling']) {
++            const h = harness();
++            h.automation[`milk_tea_auto_${action}`] = true;
++            h.summary.can_upgrade = true;
++            h.onDispatch(async cmd => {
++                if (cmd !== (action === 'craft' ? 62 : 61)) return;
++                await Promise.resolve();
++                if (change === 'disabled') h.automation[`milk_tea_auto_${action}`] = false;
++                else h.setTime(1794672000);
++            });
++            await h.service.runMilkTeaAutomation();
++            assert.equal(h.calls.length, 0);
++            assert.equal(h.bag[3].count, 20);
++        }
++    }
++});
++
++test('milk tea automation stays disabled without activity or inventory requests', async () => {
++    const h = harness();
++    const result = await h.service.runMilkTeaAutomation?.();
++    assert.equal(result?.status, 'disabled');
++    assert.equal(h.reads, 0);
++    assert.equal(h.calls.length, 0);
++});
++
++test('milk tea automation upgrades an eligible shop then crafts only ordinary unlocked fruit stacks', async () => {
++    const h = harness();
++    Object.assign(h.automation, { milk_tea_auto_upgrade: true, milk_tea_auto_craft: true });
++    h.summary.can_upgrade = true;
++    h.bag.push({ id: 40525, uid: 901, count: 10, locked: true }, { id: 40525, uid: 902, count: 10, mutant_types: [7] }, { id: 999, uid: 903, count: 10 });
++    const result = await h.service.runMilkTeaAutomation?.();
++    assert.deepEqual(h.calls.map(v => v.operate_type), ['61', '62']);
++    assert.deepEqual(h.calls[1].milk_tea_craft.fruit_uids, ['900']);
++    assert.equal(result?.craftedCups, 20);
++    assert.equal(result?.upgraded, true);
++    assert.equal(h.bag[4].count, 10);
++    assert.ok(h.logs.length >= 2);
++});
++
++test('milk tea automation does not open shops or operate outside the business period', async () => {
++    for (const scenario of ['unopened', 'settling', 'ended']) {
++        const h = harness();
++        Object.assign(h.automation, { milk_tea_auto_upgrade: true, milk_tea_auto_craft: true });
++        h.summary.can_upgrade = true;
++        if (scenario === 'unopened') h.summary.shop_open_at = 0;
++        else h.setTime(scenario === 'settling' ? 1794672000 : 1794844800);
++        const result = await h.service.runMilkTeaAutomation?.();
++        assert.equal(result?.status, 'skipped');
++        assert.equal(h.calls.length, 0);
++    }
++});
++
++test('milk tea automation rechecks mutations and locks immediately before consuming fruit', async () => {
++    for (const changed of ['mutation', 'lock', 'count']) {
++        const h = harness();
++        h.automation.milk_tea_auto_craft = true;
++        h.onBagRead(count => {
++            if (count !== 2) return;
++            if (changed === 'mutation') h.bag[3].mutant_types = [8];
++            else if (changed === 'lock') h.bag[3].locked = true;
++            else h.bag[3].count = 19;
++        });
++        const result = await h.service.runMilkTeaAutomation?.();
++        assert.equal(result?.status, 'error');
++        assert.equal(h.calls.length, 0);
++    }
++});
++
++test('milk tea automatic and manual crafting share a queue and never consume the same stack twice', async () => {
++    const h = harness();
++    h.automation.milk_tea_auto_craft = true;
++    await Promise.allSettled([
++        h.service.runMilkTeaAutomation?.(),
++        h.service.operateMilkTeaActivity('craft', { fruits: [{ uid: '900', count: 20 }] }),
++    ]);
++    assert.equal(h.calls.length, 1);
++    assert.equal(h.service.getMilkTeaAutomationState?.().craftedCups, 20);
++});
++
++test('milk tea automation stops queued actions after logout or disabling the switch', async () => {
++    const h = harness();
++    h.automation.milk_tea_auto_craft = true;
++    let connected = true;
++    h.onBagRead(() => connected = false);
++    const result = await h.service.runMilkTeaAutomation?.(() => connected);
++    assert.equal(result?.status, 'disabled');
++    assert.equal(h.calls.length, 0);
++});
++
++test('milk tea automation preserves a successful upgrade when refresh fails and defers crafting', async () => {
++    const h = harness();
++    Object.assign(h.automation, { milk_tea_auto_upgrade: true, milk_tea_auto_craft: true });
++    h.summary.can_upgrade = true;
++    h.failRefresh();
++    const result = await h.service.runMilkTeaAutomation?.();
++    assert.equal(result?.upgraded, true);
++    assert.deepEqual(h.calls.map(v => v.operate_type), ['61']);
++});
++
++test('milk tea automation cancels a write when disabled during its final inventory check', async () => {
++    const h = harness();
++    h.automation.milk_tea_auto_craft = true;
++    h.onBagRead(count => { if (count === 2) h.automation.milk_tea_auto_craft = false; });
++    await h.service.runMilkTeaAutomation();
++    assert.equal(h.calls.length, 0);
++});
++
++test('milk tea automation backs off after an inventory change instead of immediately retrying', async () => {
++    const h = harness();
++    h.automation.milk_tea_auto_craft = true;
++    h.onBagRead(count => { if (count === 2) h.bag[3].locked = true; });
++    const failed = await h.service.runMilkTeaAutomation();
++    const reads = h.reads;
++    h.bag[3].locked = false;
++    await h.service.runMilkTeaAutomation();
++    assert.equal(h.reads, reads);
++    assert.equal(h.calls.length, 0);
++    h.setTime(failed.nextCheckAt);
++    await h.service.runMilkTeaAutomation();
++    assert.equal(h.calls.length, 1);
++});
++
+ test('boost spends the checked horn once and returns actual awards, retaining success after refresh failure', async () => {
+     const h = harness();
+     const state = await h.service.getMilkTeaActivity();
+diff --git a/core/tests/network-send-guard.test.js b/core/tests/network-send-guard.test.js
+new file mode 100644
+index 0000000..ecf4371
+--- /dev/null
++++ b/core/tests/network-send-guard.test.js
+@@ -0,0 +1,77 @@
++const test = require('node:test');
++const assert = require('node:assert/strict');
++const fs = require('node:fs');
++const path = require('node:path');
++const vm = require('node:vm');
++const { createRequire } = require('node:module');
++
++function harness({ pauseEncoding = false } = {}) {
++    const file = path.resolve(__dirname, '../dist/utils/network.js');
++    const realRequire = createRequire(file);
++    const priority = realRequire('./request-priority');
++    let dispatch = false;
++    let finishEncoding;
++    const encoding = pauseEncoding ? new Promise(resolve => finishEncoding = resolve) : Promise.resolve();
++    const packets = [];
++    const box = { exports: {} };
++    const overrides = {
++        ws: { OPEN: 1 },
++        '../services/scheduler': { createScheduler: () => ({ clear() {}, clearAll() {}, setTimeoutTask() {} }) },
++        './request-priority': { ...priority, selectDispatchIndex: (...args) => dispatch ? priority.selectDispatchIndex(...args) : -1 },
++    };
++    vm.runInNewContext(fs.readFileSync(file, 'utf8') + `
++        ws = { readyState: 1, send: packet => packets.push(packet) };
++        currentConnection = { socket: ws, phase: 'online', finalized: false };
++        encodeMsg = async () => { await encoding; return Buffer.from('fixture'); };
++        module.exports.flush = drainRequestQueue;
++    `, { require: name => overrides[name] || realRequire(name), module: box, exports: box.exports,
++        Buffer, console, process, Date, packets, encoding });
++    return { api: box.exports, packets, flush: () => { dispatch = true; box.exports.flush(); }, finishEncoding };
++}
++
++test('queued background writes recheck their guard before sending after a switch is disabled', async () => {
++    const h = harness();
++    let enabled = true;
++    const pending = h.api.sendMsgAsync('fixture.Service', 'Craft', Buffer.alloc(0), { expectReply: false, requestClass: 'background', beforeSend: () => enabled });
++    enabled = false;
++    h.flush();
++    await assert.rejects(pending, /取消/);
++    assert.equal(h.packets.length, 0);
++});
++
++test('a switch disabled during asynchronous encoding still prevents the socket write', async () => {
++    const h = harness({ pauseEncoding: true });
++    let enabled = true;
++    const pending = h.api.sendMsgAsync('fixture.Service', 'Craft', Buffer.alloc(0), { expectReply: false, beforeSend: () => enabled });
++    h.flush();
++    enabled = false;
++    h.finishEncoding();
++    await assert.rejects(pending, /取消/);
++    assert.equal(h.packets.length, 0);
++});
++
++test('an enabled guarded write retains ordinary network dispatch behavior', async () => {
++    const h = harness();
++    const pending = h.api.sendMsgAsync('fixture.Service', 'Craft', Buffer.alloc(0), { expectReply: false, beforeSend: () => true });
++    h.flush();
++    await pending;
++    assert.equal(h.packets.length, 1);
++});
++
++test('cancelling a reply-bearing write releases its pending slot and allows subsequent requests', async () => {
++    for (const throws of [false, true]) {
++        const h = harness({ pauseEncoding: true });
++        const pending = h.api.sendMsgAsync('fixture.Service', 'Craft', Buffer.alloc(0), { beforeSend: () => {
++            if (throws) throw new Error('guard cancelled');
++            return false;
++        } });
++        h.flush();
++        assert.equal(h.api.getGatewayLoad().pending, 1);
++        h.finishEncoding();
++        await assert.rejects(pending);
++        assert.equal(h.api.getGatewayLoad().pending, 0);
++        assert.equal(h.api.getGatewayLoad().queued, 0);
++        await h.api.sendMsgAsync('fixture.Service', 'Read', Buffer.alloc(0), { expectReply: false });
++        assert.equal(h.packets.length, 1);
++    }
++});
+diff --git a/core/tests/warehouse-lock-coordination.test.js b/core/tests/warehouse-lock-coordination.test.js
+new file mode 100644
+index 0000000..8647299
+--- /dev/null
++++ b/core/tests/warehouse-lock-coordination.test.js
+@@ -0,0 +1,40 @@
++const test = require('node:test');
++const assert = require('node:assert/strict');
++const fs = require('node:fs');
++const path = require('node:path');
++const vm = require('node:vm');
++
++function harness(failRequest) {
++    let releaseBag;
++    const bagPromise = new Promise(resolve => releaseBag = resolve);
++    const generic = new Proxy({}, { get: () => () => {} });
++    const protocol = { create: value => value, encode: () => ({ finish: () => Buffer.alloc(0) }), decode: () => ({ item_uids: [900] }) };
++    const overrides = {
++        '../config/gameConfig': { getItemById: () => ({ type: 17, name: 'fruit' }) },
++        '../utils/utils': { toNum: Number, toLong: Number },
++        '../utils/network': { sendMsgAsync: async () => { if (failRequest) throw new Error('network unavailable'); return { body: Buffer.alloc(0) }; } },
++        '../utils/proto': { types: { LockItemsRequest: protocol, LockItemsReply: protocol } },
++    };
++    const box = { exports: {} };
++    vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../dist/services/warehouse.js'), 'utf8') + '\ngetBag = () => bagPromise;', {
++        require: name => overrides[name] || generic, module: box, exports: box.exports, Buffer, Date, console, setTimeout, clearTimeout, bagPromise,
++    });
++    return { api: box.exports, releaseBag: () => releaseBag({ items: [{ uid: 900, id: 40525, count: 20, locked: false }] }) };
++}
++
++for (const failed of [false, true]) {
++    test(`inventory lock revision begins before reading and is released after ${failed ? 'failure' : 'success'}`, async () => {
++        const h = harness(failed);
++        assert.equal(typeof h.api.getItemLockState, 'function');
++        const before = h.api.getItemLockState();
++        const pending = h.api.setItemsLocked([900], true);
++        const during = h.api.getItemLockState();
++        assert.equal(during.pending, 1);
++        assert.ok(during.revision > before.revision);
++        h.releaseBag();
++        if (failed) await assert.rejects(pending, /network unavailable/);
++        else assert.equal((await pending).changed, 1);
++        assert.equal(h.api.getItemLockState().pending, 0);
++        assert.ok(h.api.getItemLockState().revision > during.revision);
++    });
++}
+diff --git a/docs/milk-tea-automation.md b/docs/milk-tea-automation.md
+new file mode 100644
+index 0000000..c576649
+--- /dev/null
++++ b/docs/milk-tea-automation.md
+@@ -0,0 +1,19 @@
++# 奶茶活动自动升级与制作
++
++功能版本：`milk-tea-auto-v2`。
++
++在「设置 → 自动控制 → 奶茶活动」分别开启「自动升级奶茶店铺」和「自动制作奶茶」，点击「保存自动控制」。开关按账号保存，现有账号默认关闭。
++
++- 已登录账号在服务器后台每分钟检查一次，先尝试升级，再制作；关闭网页或电脑后继续运行。
++- 升级依据服务器的实时资格和当前等级；未达到条件、未开业、活动结束或结算期间不操作。
++- 仅开启自动升级时不读取背包或工坊，避免无关接口故障阻断升级。
++- 制作只使用已解锁配方对应的未锁定普通果实，保留变异果实。协议以果实 UID 提交，因此每个选中的堆叠全部消耗，单轮最多处理 200 个堆叠。
++- 提交前再次读取材料数量、锁定和变异状态；数量变化时取消本轮。自动与手动奶茶操作共用串行队列。
++- 面板内锁定/解锁物品从开始到完成都会使旧材料快照失效；锁仓仍在进行或材料快照超过 15 秒时，待发制作请求取消，下一轮重新读取。手机游戏等外部操作仍由游戏服务器校验。
++- 关闭开关、账号离线、登录会话变化或进入结算期后，尚未发送的请求会取消。已经发送给服务器的请求无法撤回。
++- 失败后至少等一分钟再检查，连续失败逐步延长到最多十五分钟；不立即重复消耗操作。成功但刷新失败的升级会保留成功结果，下一轮再刷新。
++- 奶茶页展示开关状态和最近检查结果，可用页面的刷新按钮获取最新状态。运行日志记录升级、制作杯数和失败原因。
++
++不会自动开业、改名、雇佣、使用喇叭、购买、兑换或领取奖励。这些操作仍由用户自行决定。
++
++发布时须同时检查上游 revision 与功能标记，不能只凭上游提交相同就跳过自定义补丁。候选镜像须通过测试、登录兼容检查和隔离启动后，才使用原备份及回退流程切换。
+diff --git a/web/src/components/settings/AutomationSettingsForm.vue b/web/src/components/settings/AutomationSettingsForm.vue
+index 2b26a48..c105313 100644
+--- a/web/src/components/settings/AutomationSettingsForm.vue
++++ b/web/src/components/settings/AutomationSettingsForm.vue
+@@ -38,6 +38,18 @@ const settings = defineModel<AutomationSettingsFormModel>({ required: true })
+   <div class="space-y-4">
+     <div class="automation-card-layout">
+       <div class="automation-card-column">
++        <section class="farm-card rounded-2xl p-4" aria-labelledby="milk-tea-automation-heading">
++          <h3 id="milk-tea-automation-heading" class="mb-3 text-base font-semibold">
++            奶茶活动
++          </h3>
++          <div class="space-y-3">
++            <BaseSwitch v-model="settings.automation.milk_tea_auto_upgrade" class="automation-setting-item" label="自动升级奶茶店铺" />
++            <BaseSwitch v-model="settings.automation.milk_tea_auto_craft" class="automation-setting-item" label="自动制作奶茶" />
++          </div>
++          <p class="mt-3 text-sm text-gray-600 dark:text-gray-300">
++            后台每分钟检查一次，先升级再制作。仅使用已解锁配方对应的未锁定普通果实，每个所选堆叠会全部消耗；保留变异果实。未开业、结算期或活动结束时跳过。
++          </p>
++        </section>
+         <section class="farm-card rounded-2xl p-4">
+           <div class="mb-4 flex items-start gap-3">
+             <div class="h-9 w-9 flex shrink-0 items-center justify-center rounded-lg bg-green-50 text-green-600 dark:bg-green-900/25 dark:text-green-400">
+diff --git a/web/src/stores/setting.ts b/web/src/stores/setting.ts
+index 2d58d74..d933dff 100644
+--- a/web/src/stores/setting.ts
++++ b/web/src/stores/setting.ts
+@@ -6,6 +6,8 @@ export interface AutomationConfig {
+   farm?: boolean
+   farm_push?: boolean
+   land_upgrade?: boolean
++  milk_tea_auto_upgrade?: boolean
++  milk_tea_auto_craft?: boolean
+   friend?: boolean
+   friend_auto_accept?: boolean
+   task?: boolean
+diff --git a/web/src/views/Settings.vue b/web/src/views/Settings.vue
+index 57b82e4..6cd6b72 100644
+--- a/web/src/views/Settings.vue
++++ b/web/src/views/Settings.vue
+@@ -874,6 +874,8 @@ const localAutomationSettings = ref({
+     fertilizer_gift: false,
+     fertilizer_buy_organic: false,
+     fertilizer_buy_normal: false,
++    milk_tea_auto_upgrade: false,
++    milk_tea_auto_craft: false,
+     mystery_shop_auto_buy: false,
+     mystery_shop_allow_gold: true,
+     mystery_shop_allow_coupon: false,
+@@ -927,6 +929,8 @@ function syncLocalAutomationSettings() {
+         fertilizer_gift: false,
+         fertilizer_buy_organic: false,
+         fertilizer_buy_normal: false,
++        milk_tea_auto_upgrade: false,
++        milk_tea_auto_craft: false,
+         mystery_shop_auto_buy: false,
+         mystery_shop_allow_gold: true,
+         mystery_shop_allow_coupon: false,
+@@ -959,6 +963,8 @@ function syncLocalAutomationSettings() {
+         fertilizer_gift: false,
+         fertilizer_buy_organic: false,
+         fertilizer_buy_normal: false,
++        milk_tea_auto_upgrade: false,
++        milk_tea_auto_craft: false,
+         mystery_shop_auto_buy: false,
+         mystery_shop_allow_gold: true,
+         mystery_shop_allow_coupon: false,
+diff --git a/web/src/views/activity-center/MilkTeaPage.vue b/web/src/views/activity-center/MilkTeaPage.vue
+index d6a4031..5137daf 100644
+--- a/web/src/views/activity-center/MilkTeaPage.vue
++++ b/web/src/views/activity-center/MilkTeaPage.vue
+@@ -206,6 +206,17 @@ onUnmounted(() => sequence++)
+         </div>
+       </div>
+       <main class="tea-scroll">
++        <section v-if="mainState?.automation" class="mx-3 mb-3 rounded-xl bg-white/80 p-3 text-sm text-gray-700" aria-label="奶茶自动化状态">
++          <div class="flex flex-wrap items-center justify-between gap-2">
++            <strong>自动升级：{{ mainState.automation.autoUpgrade ? '开启' : '关闭' }} · 自动制作：{{ mainState.automation.autoCraft ? '开启' : '关闭' }}</strong>
++            <RouterLink to="/settings" class="text-green-700 underline underline-offset-2">
++              前往设置 → 自动控制
++            </RouterLink>
++          </div>
++          <p class="mt-1">
++            {{ mainState.automation.message }}<span v-if="mainState.automation.lastCheckAt"> · 最近检查 {{ new Date(mainState.automation.lastCheckAt * 1000).toLocaleTimeString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' }) }}</span>
++          </p>
++        </section>
+         <MilkTeaContent v-if="mainState" :key="mainPage" :state="mainState" :page="mainPage" :busy="busy" @navigate="navigate" @operation="request" @confirmation="select" @reload="reload" />
+         <div v-else class="empty">
+           <span>{{ !currentAccountId ? '请先选择账号' : busy ? '正在加载…' : '暂未获取到活动数据' }}</span><button v-if="currentAccountId && !busy" @click="request()">
