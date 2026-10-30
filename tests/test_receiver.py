@@ -25,13 +25,14 @@ def previous_receiver():
 
 
 class ReceiverTests(unittest.TestCase):
-    def test_base_and_v1_migrate_to_same_v4_source_and_preserve_login_hook(self):
+    def test_base_and_v1_migrate_to_same_v5_source_and_preserve_login_hook(self):
         current = receiver.transform(BASE)
         previous = previous_receiver()
         self.assertEqual(receiver.transform(previous), current)
         self.assertEqual(receiver.transform((ROOT / 'tests/fixtures/updater-v2.py').read_text(encoding='utf-8')), current)
         self.assertEqual(receiver.transform((ROOT / 'tests/fixtures/updater-v3.py').read_text(encoding='utf-8')), current)
-        self.assertEqual(receiver.CAPABILITY, 'milk-tea-auto-v4')
+        self.assertEqual(receiver.transform((ROOT / 'tests/fixtures/updater-v4.py').read_text(encoding='utf-8')), current)
+        self.assertEqual(receiver.CAPABILITY, 'milk-tea-auto-v5')
         self.assertEqual(receiver.transform(current), current)
         self.assertIn('from login_compat import prepare', current)
         self.assertNotIn('milk-tea-auto-v1', current)
@@ -60,11 +61,11 @@ class ReceiverTests(unittest.TestCase):
             self.assertEqual((Path(result['backup']) / 'updater.py').read_text(encoding='utf-8'), previous)
             self.assertEqual(receiver.install(updater, root / 'backups')['status'], 'already_installed')
 
-    def test_candidate_image_requires_v4_label_before_smoke_test(self):
-        for version in ['milk-tea-auto-v1', 'milk-tea-auto-v2', 'milk-tea-auto-v3', 'milk-tea-auto-v4']:
+    def test_candidate_image_requires_v5_label_before_smoke_test(self):
+        for version in ['milk-tea-auto-v1', 'milk-tea-auto-v2', 'milk-tea-auto-v3', 'milk-tea-auto-v4', 'milk-tea-auto-v5']:
             run = Mock(return_value=json.dumps([{'Config': {'Labels': {'qq-farm.milk-tea-automation': version}}}]))
             check = function(receiver.transform(BASE), 'check_milk_automation', {'json': json, 'run': run})
-            if not version.endswith('v4'):
+            if not version.endswith('v5'):
                 with self.assertRaisesRegex(RuntimeError, 'capability missing'):
                     check('candidate')
                 self.assertEqual(run.call_count, 1)
@@ -80,35 +81,35 @@ class ReceiverTests(unittest.TestCase):
                          and ast.unparse(v.test).startswith('revision == deployed'))
         expression = compile(ast.Expression(condition), '<skip-condition>', 'eval')
         args = type('Args', (), {'build_check': False})()
-        for version, skip in [('milk-tea-auto-v1', False), ('milk-tea-auto-v2', False), ('milk-tea-auto-v3', False), ('milk-tea-auto-v4', True)]:
+        for version, skip in [('milk-tea-auto-v1', False), ('milk-tea-auto-v2', False), ('milk-tea-auto-v3', False), ('milk-tea-auto-v4', False), ('milk-tea-auto-v5', True)]:
             self.assertEqual(eval(expression, {'revision': 'a' * 40, 'deployed': 'a' * 40, 'args': args,
                                                'live_labels': {'qq-farm.milk-tea-automation': version}}), skip)
 
-    def test_build_queries_v4_release_and_rejects_v1_manifest(self):
+    def test_build_queries_v5_release_and_rejects_v1_manifest(self):
         import re
         revision = 'a' * 40
-        prefix = 'https://github.com/owner/repo/releases/download/upstream-' + revision + '-milk-tea-auto-v4/'
-        release = {'tag_name': 'upstream-' + revision + '-milk-tea-auto-v4', 'assets': [
+        prefix = 'https://github.com/owner/repo/releases/download/upstream-' + revision + '-milk-tea-auto-v5/'
+        release = {'tag_name': 'upstream-' + revision + '-milk-tea-auto-v5', 'assets': [
             {'name': name, 'browser_download_url': prefix + name, 'size': 100}
             for name in ['manifest.json', 'qq-farm-image.tar.gz']]}
-        metadata = {'revision': revision, 'image_tag': 'qq-farm-bot:auto-' + revision[:12] + '-milk-tea-auto-v4',
+        metadata = {'revision': revision, 'image_tag': 'qq-farm-bot:auto-' + revision[:12] + '-milk-tea-auto-v5',
                     'build_capability': 'milk-tea-auto-v1', 'sha256': 'b' * 64, 'size': 100,
-                    'compatibility': ['qmsg-v3', 'qq-login-confirmed-without-qr', 'milk-tea-auto-v4']}
+                    'compatibility': ['qmsg-v3', 'qq-login-confirmed-without-qr', 'milk-tea-auto-v5']}
         github_json = Mock(side_effect=[release, metadata])
         build = function(receiver.transform(BASE), 'build', {'BUILD_REPOSITORY': 'owner/repo',
                                                             'github_json': github_json, 're': re})
         with self.assertRaisesRegex(RuntimeError, 'compatibility metadata'):
             build(revision)
-        self.assertTrue(github_json.call_args_list[0].args[0].endswith('-milk-tea-auto-v4'))
+        self.assertTrue(github_json.call_args_list[0].args[0].endswith('-milk-tea-auto-v5'))
 
-    def test_previous_capability_failure_does_not_block_v4_and_new_failures_record_capability(self):
+    def test_previous_capability_failure_does_not_block_v5_and_new_failures_record_capability(self):
         source = receiver.transform(previous_receiver())
         main = next(v for v in ast.parse(source).body if isinstance(v, ast.FunctionDef) and v.name == 'main')
         gate = next(v.test for v in ast.walk(main) if isinstance(v, ast.If)
                     and ast.unparse(v.test).startswith("state.get('failed_revision') == revision"))
         args = type('Args', (), {'build_check': False, 'retry': False})()
         expression = compile(ast.Expression(gate), '<failure-condition>', 'eval')
-        for capability, skip in [(None, False), ('milk-tea-auto-v1', False), ('milk-tea-auto-v2', False), ('milk-tea-auto-v3', False), ('milk-tea-auto-v4', True)]:
+        for capability, skip in [(None, False), ('milk-tea-auto-v1', False), ('milk-tea-auto-v2', False), ('milk-tea-auto-v3', False), ('milk-tea-auto-v4', False), ('milk-tea-auto-v5', True)]:
             state = {'failed_revision': 'a' * 40, 'failed_capability': capability}
             self.assertEqual(eval(expression, {'revision': 'a' * 40, 'state': state, 'args': args}), skip)
         failure = next(v for v in ast.walk(main) if isinstance(v, ast.If)
@@ -116,7 +117,7 @@ class ReceiverTests(unittest.TestCase):
         previous = {}
         exec(compile(ast.Module(body=failure.body, type_ignores=[]), '<failure-write>', 'exec'),
              {'previous': previous, 'revision': 'a' * 40})
-        self.assertEqual(previous, {'failed_revision': 'a' * 40, 'failed_capability': 'milk-tea-auto-v4'})
+        self.assertEqual(previous, {'failed_revision': 'a' * 40, 'failed_capability': 'milk-tea-auto-v5'})
 
 
 if __name__ == '__main__':

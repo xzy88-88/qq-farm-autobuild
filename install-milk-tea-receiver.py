@@ -1,4 +1,4 @@
-"""Preserve verified milk-tea-auto-v4 releases with the existing transactional updater."""
+"""Preserve verified milk-tea-auto-v5 releases with the existing transactional updater."""
 import ast
 import hashlib
 import json
@@ -7,15 +7,15 @@ import pathlib
 import shutil
 import time
 
-CAPABILITY = 'milk-tea-auto-v4'
-MARKER = '# maintained milk-tea-auto-v4 receiver'
+CAPABILITY = 'milk-tea-auto-v5'
+MARKER = '# maintained milk-tea-auto-v5 receiver'
 
 LEGACY_CHECK_SCRIPT = 'const m=require("./dist/services/milk-tea");if(typeof m.runMilkTeaAutomation!=="function"||typeof m.getMilkTeaAutomationState!=="function"||m.getMilkTeaAutomationState().autoCraft)throw Error("invalid milk tea automation capability")'
 CHECK_SCRIPT = 'const m=require("./dist/services/milk-tea");const s=m.getMilkTeaAutomationState();if(typeof m.runMilkTeaAutomation!=="function"||s.autoCraft||s.autoHire!==false||s.hireDurationId!==1||s.hireReserve!==100)throw Error("invalid milk tea automation capability")'
 
 CHECK = '''def check_milk_automation(tag):
     labels = json.loads(run(['docker', 'image', 'inspect', tag]))[0]['Config'].get('Labels', {})
-    if labels.get('qq-farm.milk-tea-automation') != 'milk-tea-auto-v4':
+    if labels.get('qq-farm.milk-tea-automation') != 'milk-tea-auto-v5':
         raise RuntimeError('Milk tea automation capability missing; existing deployment preserved')
     script = 'const m=require("./dist/services/milk-tea");const s=m.getMilkTeaAutomationState();if(typeof m.runMilkTeaAutomation!=="function"||s.autoCraft||s.autoHire!==false||s.hireDurationId!==1||s.hireReserve!==100)throw Error("invalid milk tea automation capability")'
     run(['docker', 'run', '--rm', '--network=none', '--tmpfs', '/app/core/data:rw,size=16m', '--entrypoint', 'node', tag, '-e', script])
@@ -30,7 +30,7 @@ def transform(source):
     if MARKER in source:
         validate_maintained_receiver(source, CAPABILITY)
         return source
-    for previous in ['milk-tea-auto-v1', 'milk-tea-auto-v2', 'milk-tea-auto-v3']:
+    for previous in ['milk-tea-auto-v1', 'milk-tea-auto-v2', 'milk-tea-auto-v3', 'milk-tea-auto-v4']:
         if '# maintained ' + previous + ' receiver' in source:
             validate_maintained_receiver(source, previous)
             source = source.replace(previous, CAPABILITY)
@@ -42,8 +42,8 @@ def transform(source):
             return source
 
     source = replace_once(source, replacements_for_base() + replacements_for_failure_identity())
-    source = source.replace(r'[0-9a-f]{40}\.tar', r'[0-9a-f]{40}(?:-milk-tea-auto-v4)?\.tar')
-    source = source.replace(r'qq-farm-bot:auto-[0-9a-f]{12}', r'qq-farm-bot:auto-[0-9a-f]{12}(?:-milk-tea-auto-v4)?')
+    source = source.replace(r'[0-9a-f]{40}\.tar', r'[0-9a-f]{40}(?:-milk-tea-auto-v5)?\.tar')
+    source = source.replace(r'qq-farm-bot:auto-[0-9a-f]{12}', r'qq-farm-bot:auto-[0-9a-f]{12}(?:-milk-tea-auto-v5)?')
     ast.parse(source)
     return source
 
@@ -72,9 +72,9 @@ def validate_maintained_receiver(source, capability):
 def replacements_for_failure_identity():
     return [
         ("if state.get('failed_revision') == revision and not args.build_check and not args.retry:",
-         "if state.get('failed_revision') == revision and state.get('failed_capability') == 'milk-tea-auto-v4' and not args.build_check and not args.retry:"),
+         "if state.get('failed_revision') == revision and state.get('failed_capability') == 'milk-tea-auto-v5' and not args.build_check and not args.retry:"),
         ("if deploy_started and not args.build_check: previous['failed_revision'] = revision",
-         "if deploy_started and not args.build_check: previous.update(failed_revision=revision, failed_capability='milk-tea-auto-v4')"),
+         "if deploy_started and not args.build_check: previous.update(failed_revision=revision, failed_capability='milk-tea-auto-v5')"),
         ("state.pop('failed_revision', None)",
          "state.pop('failed_revision', None)\n                state.pop('failed_capability', None)"),
     ]
@@ -82,15 +82,15 @@ def replacements_for_failure_identity():
 
 def replacements_for_base():
     return [
-        ("'/releases/tags/upstream-' + revision", "'/releases/tags/upstream-' + revision + '-milk-tea-auto-v4'"),
-        ("release.get('tag_name') != 'upstream-' + revision:", "release.get('tag_name') != 'upstream-' + revision + '-milk-tea-auto-v4':"),
-        ("'/releases/download/upstream-' + revision + '/'", "'/releases/download/upstream-' + revision + '-milk-tea-auto-v4/'"),
-        ("tag = 'qq-farm-bot:auto-' + revision[:12]", "tag = 'qq-farm-bot:auto-' + revision[:12] + '-milk-tea-auto-v4'"),
-        ("required = {'qmsg-v3', 'qq-login-confirmed-without-qr'}", "required = {'qmsg-v3', 'qq-login-confirmed-without-qr', 'milk-tea-auto-v4'}"),
-        ("if (metadata.get('revision') != revision or metadata.get('image_tag') != tag", "if (metadata.get('revision') != revision or metadata.get('image_tag') != tag\n            or metadata.get('build_capability') != 'milk-tea-auto-v4'"),
-        ("archive = downloads / (revision + '.tar.gz')", "archive = downloads / (revision + '-milk-tea-auto-v4.tar.gz')"),
+        ("'/releases/tags/upstream-' + revision", "'/releases/tags/upstream-' + revision + '-milk-tea-auto-v5'"),
+        ("release.get('tag_name') != 'upstream-' + revision:", "release.get('tag_name') != 'upstream-' + revision + '-milk-tea-auto-v5':"),
+        ("'/releases/download/upstream-' + revision + '/'", "'/releases/download/upstream-' + revision + '-milk-tea-auto-v5/'"),
+        ("tag = 'qq-farm-bot:auto-' + revision[:12]", "tag = 'qq-farm-bot:auto-' + revision[:12] + '-milk-tea-auto-v5'"),
+        ("required = {'qmsg-v3', 'qq-login-confirmed-without-qr'}", "required = {'qmsg-v3', 'qq-login-confirmed-without-qr', 'milk-tea-auto-v5'}"),
+        ("if (metadata.get('revision') != revision or metadata.get('image_tag') != tag", "if (metadata.get('revision') != revision or metadata.get('image_tag') != tag\n            or metadata.get('build_capability') != 'milk-tea-auto-v5'"),
+        ("archive = downloads / (revision + '.tar.gz')", "archive = downloads / (revision + '-milk-tea-auto-v5.tar.gz')"),
         ("deployed = inspect()['Config'].get('Labels', {}).get('org.opencontainers.image.revision', '')", "live_labels = inspect()['Config'].get('Labels', {})\n            deployed = live_labels.get('org.opencontainers.image.revision', '')"),
-        ("if revision == deployed and not args.build_check:", "if revision == deployed and live_labels.get('qq-farm.milk-tea-automation') == 'milk-tea-auto-v4' and not args.build_check:"),
+        ("if revision == deployed and not args.build_check:", "if revision == deployed and live_labels.get('qq-farm.milk-tea-automation') == 'milk-tea-auto-v5' and not args.build_check:"),
         ("    canary(tag)\n    cleanup_downloads", "    check_milk_automation(tag)\n    canary(tag)\n    cleanup_downloads"),
         ("def build(revision):", MARKER + '\n' + CHECK + 'def build(revision):'),
     ]
