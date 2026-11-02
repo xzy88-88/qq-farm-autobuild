@@ -1863,10 +1863,10 @@ index 0000000..b7311c4
 +2026-10-28 v4 同时保留好友关系拒绝保护：收到 Farming 的 1001048 后停止该目标的剩余请求（不再逐块重试），临时冷却 10 分钟并重新读取好友列表。已完成的操作保留真实统计，不修改已知好友 GID 或永久黑名单。普通批量失败仍保留原兜底。
 diff --git a/web/public/m/index.html b/web/public/m/index.html
 new file mode 100644
-index 0000000..7e73ab6
+index 0000000..0b11901
 --- /dev/null
 +++ b/web/public/m/index.html
-@@ -0,0 +1,532 @@
+@@ -0,0 +1,605 @@
 +<!doctype html>
 +<html lang="zh-CN">
 +<head>
@@ -2024,6 +2024,9 @@ index 0000000..7e73ab6
 +  .field input:focus { border-color: var(--green); }
 +  .err { color: var(--red); font-size: 13px; min-height: 20px; margin: 2px 0 10px; }
 +  .login .btn { width: 100%; }
++  .server-line { margin-top: 18px; text-align: center; font-size: 12px; color: var(--muted); }
++  .server-line.ok { color: var(--green); }
++  .server-line.bad { color: var(--red); }
 +
 +  .toast {
 +    position: fixed; left: 50%; bottom: calc(84px + env(safe-area-inset-bottom));
@@ -2064,6 +2067,7 @@ index 0000000..7e73ab6
 +      </div>
 +      <div class="err" id="loginErr"></div>
 +      <button class="btn btn-primary" type="submit" id="loginBtn">登录</button>
++      <p class="server-line" id="serverLine">正在连接服务器…</p>
 +    </form>
 +  </section>
 +
@@ -2132,6 +2136,9 @@ index 0000000..7e73ab6
 +
 +  var TOKEN_KEY = 'admin_token';
 +  var ACCOUNT_KEY = 'current_account_id';
++  var BASE = 'http://8.133.176.148:3007';
++  var NATIVE = typeof window.FarmNative !== 'undefined';
++  var IMG_BASE = NATIVE ? BASE : '';
 +
 +  var state = {
 +    token: localStorage.getItem(TOKEN_KEY) || '',
@@ -2148,7 +2155,66 @@ index 0000000..7e73ab6
 +    });
 +  };
 +
++  // ---- 网络层：网页走 fetch，原生壳走 JS 桥（避免跨域与明文限制）----
++  var seq = 0;
++  var pending = {};
++
++  window.__FarmApiDone = function (id, status, text, err) {
++    var slot = pending[id];
++    if (!slot) return;
++    delete pending[id];
++    if (err) { slot.reject(new Error(err)); return; }
++    var data = null;
++    try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
++    if (status === 401) {
++      var unauth = new Error('unauthorized');
++      unauth.unauthorized = true;
++      slot.reject(unauth);
++      return;
++    }
++    if (status >= 400 || (data && data.ok === false)) {
++      slot.reject(new Error((data && (data.errorMessage || data.error || data.message)) || ('请求失败 ' + status)));
++      return;
++    }
++    slot.resolve(data);
++  };
++
++  function request(method, path, body) {
++    if (!NATIVE) {
++      var headers = {};
++      if (state.token) headers['x-admin-token'] = state.token;
++      if (state.accountId) headers['x-account-id'] = state.accountId;
++      var init = { method: method, headers: headers };
++      if (body !== undefined && body !== null) {
++        headers['Content-Type'] = 'application/json';
++        init.body = JSON.stringify(body);
++      }
++      return fetch(path, init).then(function (res) {
++        if (res.status === 401) {
++          var e = new Error('unauthorized'); e.unauthorized = true; throw e;
++        }
++        return res.json().catch(function () { return null; }).then(function (data) {
++          if (!res.ok || (data && data.ok === false)) {
++            throw new Error((data && (data.errorMessage || data.error || data.message)) || ('请求失败 ' + res.status));
++          }
++          return data;
++        });
++      });
++    }
++    return new Promise(function (resolve, reject) {
++      var id = 'r' + (++seq);
++      pending[id] = { resolve: resolve, reject: reject };
++      try {
++        window.FarmNative.request(id, method, path, body == null ? '' : JSON.stringify(body), state.token || '', state.accountId || '');
++      } catch (err) {
++        delete pending[id];
++        reject(err);
++      }
++    });
++  }
++
 +  function toast(msg) {
++    if (NATIVE && window.FarmNative.toast) { window.FarmNative.toast(String(msg)); return; }
 +    var el = $('toast');
 +    el.textContent = msg;
 +    el.classList.add('show');
@@ -2159,27 +2225,6 @@ index 0000000..7e73ab6
 +  function setConn(ok, text) {
 +    $('conn').className = 'dot ' + (ok ? 'on' : 'off');
 +    $('connText').textContent = text;
-+  }
-+
-+  function api(path, options) {
-+    options = options || {};
-+    var headers = Object.assign({}, options.headers || {});
-+    if (state.token) headers['x-admin-token'] = state.token;
-+    if (state.accountId) headers['x-account-id'] = state.accountId;
-+    return fetch(path, Object.assign({}, options, { headers: headers })).then(function (res) {
-+      if (res.status === 401) {
-+        var err = new Error('unauthorized');
-+        err.unauthorized = true;
-+        throw err;
-+      }
-+      return res.json().catch(function () { return null; }).then(function (data) {
-+        if (!res.ok || (data && data.ok === false)) {
-+          var e = new Error((data && (data.errorMessage || data.error || data.message)) || ('请求失败 ' + res.status));
-+          throw e;
-+        }
-+        return data;
-+      });
-+    });
 +  }
 +
 +  function showLogin(message) {
@@ -2197,7 +2242,7 @@ index 0000000..7e73ab6
 +  function renderAccounts() {
 +    var box = $('accounts');
 +    if (!state.accounts.length) {
-+      box.innerHTML = '<div class="card"><div class="empty">还没有账号，去「账号管理」添加</div></div>';
++      box.innerHTML = '<div class="card"><div class="empty">还没有账号' + (NATIVE ? '，请在浏览器打开完整面板添加' : '，去「账号管理」添加') + '</div></div>';
 +      $('accountsHint').textContent = '共 0 个账号';
 +      return;
 +    }
@@ -2210,8 +2255,9 @@ index 0000000..7e73ab6
 +      if (a.nick && a.nick !== name) meta.push(a.nick);
 +      if (a.uin) meta.push('UIN ' + a.uin);
 +      var busy = !!state.busy[a.id];
-+      var avatar = a.avatar
-+        ? '<img class="avatar" src="' + esc(a.avatar) + '" alt="" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement(\'div\'),{className:\'avatar\',textContent:\'🌱\'}))" />'
++      var avatarSrc = a.avatar ? (/^https?:/i.test(a.avatar) ? a.avatar : IMG_BASE + a.avatar) : '';
++      var avatar = avatarSrc
++        ? '<img class="avatar" data-avatar="1" src="' + esc(avatarSrc) + '" alt="" referrerpolicy="no-referrer" />'
 +        : '<div class="avatar">🌱</div>';
 +      return '<div class="card">' +
 +        '<div class="acct">' + avatar +
@@ -2237,7 +2283,7 @@ index 0000000..7e73ab6
 +  function loadAccounts(quiet) {
 +    if (!state.token) { showLogin(); return Promise.resolve(); }
 +    if (!quiet) $('refresh').firstElementChild.classList.add('spin');
-+    return api('/api/accounts').then(function (res) {
++    return request('GET', '/api/accounts').then(function (res) {
 +      var data = (res && res.data) || {};
 +      state.accounts = Array.isArray(data.accounts) ? data.accounts : [];
 +      if (!state.accountId && state.accounts.length) {
@@ -2258,7 +2304,7 @@ index 0000000..7e73ab6
 +  function loadLogs(limit) {
 +    var box = $('logs');
 +    box.innerHTML = '<div class="empty">读取中…</div>';
-+    return api('/api/account-logs?limit=' + (limit || 40)).then(function (list) {
++    return request('GET', '/api/account-logs?limit=' + (limit || 40)).then(function (list) {
 +      if (!Array.isArray(list) || !list.length) {
 +        box.innerHTML = '<div class="empty">暂无日志</div>';
 +        return;
@@ -2281,10 +2327,20 @@ index 0000000..7e73ab6
 +  }
 +
 +  function loadVersion() {
-+    fetch('/api/game-version').then(function (r) { return r.json(); }).then(function (d) {
++    var line = $('serverLine');
++    if (line) { line.className = 'server-line'; line.textContent = '正在连接服务器…'; }
++    request('GET', '/api/game-version').then(function (d) {
 +      $('verText').textContent = '面板 ' + (d.botVersion || '?') + ' · 客户端 ' + (d.clientVersion || '?');
++      if (line) {
++        line.className = 'server-line ok';
++        line.textContent = '服务器已连接 · 面板 ' + (d.botVersion || '?');
++      }
 +    }).catch(function () {
 +      $('verText').textContent = '读取失败';
++      if (line) {
++        line.className = 'server-line bad';
++        line.textContent = '无法连接服务器，请检查网络';
++      }
 +    });
 +  }
 +
@@ -2293,7 +2349,7 @@ index 0000000..7e73ab6
 +    if (act === 'stop' && !confirm('确定停止这个账号的挂机吗？')) return;
 +    state.busy[id] = true;
 +    renderAccounts();
-+    api('/api/accounts/' + encodeURIComponent(id) + '/' + act, { method: 'POST' })
++    request('POST', '/api/accounts/' + encodeURIComponent(id) + '/' + act, {})
 +      .then(function () {
 +        toast(act === 'start' ? '已开始挂机' : '已停止挂机');
 +        return loadAccounts(true);
@@ -2319,7 +2375,6 @@ index 0000000..7e73ab6
 +    window.scrollTo(0, 0);
 +  }
 +
-+  // 事件绑定
 +  document.querySelectorAll('.tabs button').forEach(function (b) {
 +    b.addEventListener('click', function () { switchView(b.dataset.view); });
 +  });
@@ -2329,6 +2384,15 @@ index 0000000..7e73ab6
 +    if ($('view-logs').classList.contains('active')) loadLogs();
 +    toast('已刷新');
 +  });
++
++  $('accounts').addEventListener('error', function (e) {
++    var t = e.target;
++    if (!t || !t.dataset || !t.dataset.avatar) return;
++    var d = document.createElement('div');
++    d.className = 'avatar';
++    d.textContent = '🌱';
++    t.replaceWith(d);
++  }, true);
 +
 +  $('accounts').addEventListener('click', function (e) {
 +    var btn = e.target.closest('button[data-act]');
@@ -2351,17 +2415,9 @@ index 0000000..7e73ab6
 +    if (!username || !password) { $('loginErr').textContent = '请输入用户名和密码'; return; }
 +    $('loginBtn').disabled = true;
 +    $('loginErr').textContent = '';
-+    fetch('/api/login', {
-+      method: 'POST',
-+      headers: { 'Content-Type': 'application/json' },
-+      body: JSON.stringify({ username: username, password: password }),
-+    }).then(function (res) {
-+      return res.json().then(function (data) { return { res: res, data: data }; });
-+    }).then(function (r) {
-+      if (!r.res.ok || !r.data || !r.data.ok) {
-+        throw new Error((r.data && (r.data.error || r.data.message)) || '登录失败');
-+      }
-+      state.token = r.data.data.token;
++    request('POST', '/api/login', { username: username, password: password }).then(function (r) {
++      if (!r || !r.ok || !r.data || !r.data.token) throw new Error('登录失败');
++      state.token = r.data.token;
 +      localStorage.setItem(TOKEN_KEY, state.token);
 +      document.body.classList.remove('logged-out');
 +      $('p').value = '';
@@ -2376,11 +2432,26 @@ index 0000000..7e73ab6
 +
 +  $('logout').addEventListener('click', function () {
 +    if (!confirm('退出登录？下次需要重新输入密码。')) return;
-+    api('/api/logout', { method: 'POST' }).catch(function () {});
++    request('POST', '/api/logout', {}).catch(function () {});
 +    showLogin('');
 +  });
 +
-+  // 自动刷新：页面可见时每 10 秒同步一次账号状态
++  // 原生壳：站内链接交给系统浏览器打开完整面板
++  if (NATIVE) {
++    document.querySelectorAll('a.row-link').forEach(function (a) {
++      a.addEventListener('click', function (e) {
++        e.preventDefault();
++        var href = a.getAttribute('href') || '/';
++        var url = /^https?:/i.test(href) ? href : BASE + href;
++        if (window.FarmNative.openUrl) window.FarmNative.openUrl(url);
++      });
++    });
++    var hint = Array.prototype.slice.call(document.querySelectorAll('.row-link')).filter(function (el) {
++      return el.textContent.indexOf('装到桌面') >= 0;
++    })[0];
++    if (hint) hint.style.display = 'none';
++  }
++
 +  function startTimer() {
 +    clearInterval(state.timer);
 +    state.timer = setInterval(function () {
@@ -2394,8 +2465,10 @@ index 0000000..7e73ab6
 +  });
 +
 +  if (state.token) { switchView('accounts'); loadAccounts(); } else { showLogin(''); }
++  loadVersion();
 +  startTimer();
 +})();
++
 +</script>
 +</body>
 +</html>
