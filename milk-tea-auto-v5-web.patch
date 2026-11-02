@@ -1861,6 +1861,576 @@ index 0000000..b7311c4
 +
 +
 +2026-10-28 v4 同时保留好友关系拒绝保护：收到 Farming 的 1001048 后停止该目标的剩余请求（不再逐块重试），临时冷却 10 分钟并重新读取好友列表。已完成的操作保留真实统计，不修改已知好友 GID 或永久黑名单。普通批量失败仍保留原兜底。
+diff --git a/web/public/m/index.html b/web/public/m/index.html
+new file mode 100644
+index 0000000..7e73ab6
+--- /dev/null
++++ b/web/public/m/index.html
+@@ -0,0 +1,532 @@
++<!doctype html>
++<html lang="zh-CN">
++<head>
++<meta charset="UTF-8" />
++<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
++<meta name="theme-color" content="#2e7d32" media="(prefers-color-scheme: light)" />
++<meta name="theme-color" content="#0f1512" media="(prefers-color-scheme: dark)" />
++<meta name="apple-mobile-web-app-capable" content="yes" />
++<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
++<meta name="apple-mobile-web-app-title" content="农场助手" />
++<meta name="format-detection" content="telephone=no" />
++<link rel="manifest" href="manifest.webmanifest" />
++<link rel="icon" href="/icon.svg?v=farmhouse-1" type="image/svg+xml" />
++<link rel="apple-touch-icon" href="/icon.png" />
++<title>农场助手</title>
++<style>
++  :root {
++    --green: #2e7d32;
++    --green-soft: #e8f5e9;
++    --red: #c62828;
++    --bg: #f4f7f2;
++    --card: #ffffff;
++    --text: #1f2a24;
++    --muted: #6b7c72;
++    --line: #e3ebe4;
++    --shadow: 0 1px 3px rgba(16, 40, 24, .08), 0 8px 24px rgba(16, 40, 24, .05);
++  }
++  @media (prefers-color-scheme: dark) {
++    :root {
++      --green: #4caf50;
++      --green-soft: #12251a;
++      --red: #ef5350;
++      --bg: #0f1512;
++      --card: #171f1b;
++      --text: #e6efe8;
++      --muted: #93a69a;
++      --line: #26302a;
++      --shadow: 0 1px 3px rgba(0, 0, 0, .4);
++    }
++  }
++  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
++  html { -webkit-text-size-adjust: 100%; }
++  body {
++    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans SC", "Microsoft YaHei", sans-serif;
++    background: var(--bg); color: var(--text);
++    padding-bottom: calc(72px + env(safe-area-inset-bottom));
++    font-size: 15px; line-height: 1.5;
++  }
++  button { font: inherit; color: inherit; border: none; background: none; cursor: pointer; }
++
++  .bar {
++    position: sticky; top: 0; z-index: 20;
++    display: flex; align-items: center; gap: 12px;
++    padding: calc(10px + env(safe-area-inset-top)) 16px 10px;
++    background: color-mix(in srgb, var(--bg) 88%, transparent);
++    backdrop-filter: saturate(180%) blur(12px);
++    border-bottom: 1px solid var(--line);
++  }
++  .bar img { width: 34px; height: 34px; border-radius: 9px; }
++  .bar h1 { font-size: 16px; font-weight: 650; letter-spacing: .2px; }
++  .bar .sub { font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 5px; margin-top: 1px; }
++  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
++  .dot.on { background: #43a047; box-shadow: 0 0 0 3px rgba(67, 160, 71, .18); }
++  .dot.off { background: var(--red); }
++  .bar .spacer { flex: 1; }
++  .icon-btn {
++    width: 38px; height: 38px; border-radius: 12px; display: grid; place-items: center;
++    background: var(--card); border: 1px solid var(--line); box-shadow: var(--shadow);
++  }
++  .icon-btn:active { transform: scale(.95); }
++  .icon-btn svg { width: 18px; height: 18px; stroke: var(--muted); fill: none; stroke-width: 2; }
++  .spin { animation: spin .8s linear infinite; }
++  @keyframes spin { to { transform: rotate(360deg); } }
++
++  main { padding: 14px 16px 8px; }
++  section { display: none; }
++  section.active { display: block; animation: fade .18s ease; }
++  @keyframes fade { from { opacity: 0; transform: translateY(4px); } }
++
++  .hint { font-size: 12px; color: var(--muted); margin: 0 2px 10px; }
++
++  .card {
++    background: var(--card); border: 1px solid var(--line); border-radius: 16px;
++    padding: 14px; margin-bottom: 12px; box-shadow: var(--shadow);
++  }
++  .acct { display: flex; align-items: center; gap: 12px; }
++  .acct .avatar {
++    width: 44px; height: 44px; border-radius: 12px; flex: none; object-fit: cover;
++    background: var(--green-soft); display: grid; place-items: center; font-size: 18px;
++  }
++  .acct .who { min-width: 0; flex: 1; }
++  .acct .name { font-weight: 620; font-size: 15px; display: flex; align-items: center; gap: 6px; }
++  .acct .meta { font-size: 12px; color: var(--muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
++  .chip {
++    font-size: 10px; font-weight: 600; padding: 2px 6px; border-radius: 6px;
++    background: var(--green-soft); color: var(--green); letter-spacing: .3px;
++  }
++  .actions { display: flex; gap: 8px; margin-top: 12px; }
++  .btn {
++    flex: 1; height: 42px; border-radius: 12px; font-size: 14px; font-weight: 600;
++    display: flex; align-items: center; justify-content: center; gap: 6px;
++    transition: transform .08s ease, opacity .15s;
++  }
++  .btn:active { transform: scale(.97); }
++  .btn:disabled { opacity: .5; }
++  .btn-primary { background: var(--green); color: #fff; }
++  .btn-danger { background: color-mix(in srgb, var(--red) 12%, transparent); color: var(--red); }
++  .btn-ghost { background: var(--green-soft); color: var(--green); }
++
++  .log { display: flex; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); }
++  .log:last-child { border-bottom: 0; }
++  .log time { font-size: 11px; color: var(--muted); flex: none; width: 42px; padding-top: 2px; font-variant-numeric: tabular-nums; }
++  .log .body { min-width: 0; }
++  .log .tag { font-size: 12px; font-weight: 600; color: var(--green); }
++  .log .msg { font-size: 13px; color: var(--text); word-break: break-word; }
++  .log .reason { font-size: 12px; color: var(--red); margin-top: 2px; }
++  .empty { text-align: center; color: var(--muted); font-size: 13px; padding: 28px 0; }
++
++  .row-link {
++    display: flex; align-items: center; gap: 12px; padding: 14px 2px;
++    border-bottom: 1px solid var(--line); text-decoration: none; color: var(--text);
++  }
++  .row-link:last-child { border-bottom: 0; }
++  .row-link .ico { width: 34px; height: 34px; border-radius: 10px; background: var(--green-soft); display: grid; place-items: center; font-size: 16px; }
++  .row-link .txt { flex: 1; font-size: 14px; }
++  .row-link .txt small { display: block; color: var(--muted); font-size: 12px; margin-top: 1px; }
++  .row-link .arrow { color: var(--muted); font-size: 18px; }
++
++  .tabs {
++    position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
++    display: flex; padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
++    background: color-mix(in srgb, var(--card) 92%, transparent);
++    backdrop-filter: saturate(180%) blur(12px);
++    border-top: 1px solid var(--line);
++  }
++  body.logged-out .tabs { display: none; }
++  body.logged-out { padding-bottom: 0; }
++  .tabs button {
++    flex: 1; height: 50px; border-radius: 12px; font-size: 11px; color: var(--muted);
++    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
++  }
++  .tabs button svg { width: 21px; height: 21px; stroke: currentColor; fill: none; stroke-width: 1.9; }
++  .tabs button.active { color: var(--green); background: var(--green-soft); }
++
++  .login { padding: 32px 20px; }
++  .login h2 { font-size: 19px; margin-bottom: 4px; }
++  .login p { font-size: 13px; color: var(--muted); margin-bottom: 22px; }
++  .field { margin-bottom: 14px; }
++  .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
++  .field input {
++    width: 100%; height: 46px; padding: 0 14px; font-size: 16px;
++    background: var(--card); color: var(--text);
++    border: 1px solid var(--line); border-radius: 12px; outline: none;
++  }
++  .field input:focus { border-color: var(--green); }
++  .err { color: var(--red); font-size: 13px; min-height: 20px; margin: 2px 0 10px; }
++  .login .btn { width: 100%; }
++
++  .toast {
++    position: fixed; left: 50%; bottom: calc(84px + env(safe-area-inset-bottom));
++    transform: translateX(-50%) translateY(8px); opacity: 0; pointer-events: none;
++    background: #263238; color: #fff; font-size: 13px; padding: 10px 16px; border-radius: 12px;
++    max-width: 84vw; text-align: center; transition: opacity .2s, transform .2s; z-index: 40;
++  }
++  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
++  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
++</style>
++</head>
++<body>
++
++<div class="bar">
++  <img src="/icon.svg?v=farmhouse-1" alt="" />
++  <div>
++    <h1>农场助手</h1>
++    <div class="sub"><span class="dot" id="conn"></span><span id="connText">连接中…</span></div>
++  </div>
++  <div class="spacer"></div>
++  <button class="icon-btn" id="refresh" aria-label="刷新">
++    <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6" stroke-linecap="round" stroke-linejoin="round"/></svg>
++  </button>
++</div>
++
++<main>
++  <section id="view-login" class="login">
++    <h2>登录面板</h2>
++    <p>使用管理面板的账号密码，登录后可直接管理农场。</p>
++    <form id="loginForm" autocomplete="on">
++      <div class="field">
++        <label for="u">用户名</label>
++        <input id="u" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" />
++      </div>
++      <div class="field">
++        <label for="p">密码</label>
++        <input id="p" name="password" type="password" autocomplete="current-password" />
++      </div>
++      <div class="err" id="loginErr"></div>
++      <button class="btn btn-primary" type="submit" id="loginBtn">登录</button>
++    </form>
++  </section>
++
++  <section id="view-accounts" class="active">
++    <p class="hint" id="accountsHint">正在读取账号…</p>
++    <div id="accounts"></div>
++  </section>
++
++  <section id="view-logs">
++    <p class="hint" id="logsHint">最近日志</p>
++    <div class="card" id="logs"></div>
++  </section>
++
++  <section id="view-more">
++    <div class="card">
++      <a class="row-link" href="/" >
++        <span class="ico">🖥️</span>
++        <span class="txt">完整面板<small>活动、图鉴、好友、商城等全部功能</small></span>
++        <span class="arrow">›</span>
++      </a>
++      <a class="row-link" href="/settings">
++        <span class="ico">⚙️</span>
++        <span class="txt">系统设置<small>自动控制、推送、登录配置</small></span>
++        <span class="arrow">›</span>
++      </a>
++      <a class="row-link" href="/accounts">
++        <span class="ico">👤</span>
++        <span class="txt">账号管理<small>添加账号、扫码登录、备注</small></span>
++        <span class="arrow">›</span>
++      </a>
++    </div>
++    <div class="card">
++      <div class="row-link" style="border:0;padding:6px 2px">
++        <span class="ico">📦</span>
++        <span class="txt">后端版本<small id="verText">读取中…</small></span>
++      </div>
++      <div class="row-link" style="border:0;padding:6px 2px">
++        <span class="ico">📲</span>
++        <span class="txt">装到桌面<small>iPhone：分享 → 添加到主屏幕；Android：浏览器菜单 → 添加到主屏幕</small></span>
++      </div>
++      <button class="btn btn-ghost" id="logout" style="width:100%;margin-top:12px">退出登录</button>
++    </div>
++  </section>
++</main>
++
++<nav class="tabs">
++  <button data-view="accounts" class="active">
++    <svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2"/><path d="M2.8 20a6.2 6.2 0 0 1 12.4 0" stroke-linecap="round"/><path d="M16.5 5.4a3.2 3.2 0 0 1 0 5.2M18.2 20a6.4 6.4 0 0 0-1.6-4.2" stroke-linecap="round"/></svg>
++    账号
++  </button>
++  <button data-view="logs">
++    <svg viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13" stroke-linecap="round"/><path d="M3.5 6h.01M3.5 12h.01M3.5 18h.01" stroke-linecap="round"/></svg>
++    日志
++  </button>
++  <button data-view="more">
++    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1" stroke-linecap="round"/></svg>
++    更多
++  </button>
++</nav>
++
++<div class="toast" id="toast"></div>
++
++<script>
++(function () {
++  'use strict';
++
++  var TOKEN_KEY = 'admin_token';
++  var ACCOUNT_KEY = 'current_account_id';
++
++  var state = {
++    token: localStorage.getItem(TOKEN_KEY) || '',
++    accountId: localStorage.getItem(ACCOUNT_KEY) || '',
++    accounts: [],
++    timer: null,
++    busy: {},
++  };
++
++  var $ = function (id) { return document.getElementById(id); };
++  var esc = function (v) {
++    return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) {
++      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
++    });
++  };
++
++  function toast(msg) {
++    var el = $('toast');
++    el.textContent = msg;
++    el.classList.add('show');
++    clearTimeout(toast._t);
++    toast._t = setTimeout(function () { el.classList.remove('show'); }, 2000);
++  }
++
++  function setConn(ok, text) {
++    $('conn').className = 'dot ' + (ok ? 'on' : 'off');
++    $('connText').textContent = text;
++  }
++
++  function api(path, options) {
++    options = options || {};
++    var headers = Object.assign({}, options.headers || {});
++    if (state.token) headers['x-admin-token'] = state.token;
++    if (state.accountId) headers['x-account-id'] = state.accountId;
++    return fetch(path, Object.assign({}, options, { headers: headers })).then(function (res) {
++      if (res.status === 401) {
++        var err = new Error('unauthorized');
++        err.unauthorized = true;
++        throw err;
++      }
++      return res.json().catch(function () { return null; }).then(function (data) {
++        if (!res.ok || (data && data.ok === false)) {
++          var e = new Error((data && (data.errorMessage || data.error || data.message)) || ('请求失败 ' + res.status));
++          throw e;
++        }
++        return data;
++      });
++    });
++  }
++
++  function showLogin(message) {
++    state.token = '';
++    localStorage.removeItem(TOKEN_KEY);
++    document.body.classList.add('logged-out');
++    $('view-login').classList.add('active');
++    document.querySelectorAll('main > section').forEach(function (s) {
++      if (s.id !== 'view-login') s.classList.remove('active');
++    });
++    $('loginErr').textContent = message || '';
++    setConn(false, '未登录');
++  }
++
++  function renderAccounts() {
++    var box = $('accounts');
++    if (!state.accounts.length) {
++      box.innerHTML = '<div class="card"><div class="empty">还没有账号，去「账号管理」添加</div></div>';
++      $('accountsHint').textContent = '共 0 个账号';
++      return;
++    }
++    $('accountsHint').textContent = '共 ' + state.accounts.length + ' 个账号 · 每 10 秒自动刷新';
++    box.innerHTML = state.accounts.map(function (a) {
++      var running = !!a.running;
++      var name = a.name || a.nick || ('账号 ' + a.id);
++      var platform = a.platform === 'wx' ? '微信' : a.platform === 'qq' ? 'QQ' : '';
++      var meta = [];
++      if (a.nick && a.nick !== name) meta.push(a.nick);
++      if (a.uin) meta.push('UIN ' + a.uin);
++      var busy = !!state.busy[a.id];
++      var avatar = a.avatar
++        ? '<img class="avatar" src="' + esc(a.avatar) + '" alt="" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement(\'div\'),{className:\'avatar\',textContent:\'🌱\'}))" />'
++        : '<div class="avatar">🌱</div>';
++      return '<div class="card">' +
++        '<div class="acct">' + avatar +
++          '<div class="who">' +
++            '<div class="name">' + esc(name) +
++              (platform ? ' <span class="chip">' + platform + '</span>' : '') +
++            '</div>' +
++            '<div class="meta">' + (meta.length ? esc(meta.join(' · ')) : 'ID ' + esc(a.id)) +
++              ' · <span style="color:' + (running ? 'var(--green)' : 'var(--muted)') + '">' + (running ? '运行中' : '已停止') + '</span>' +
++            '</div>' +
++          '</div>' +
++        '</div>' +
++        '<div class="actions">' +
++          (running
++            ? '<button class="btn btn-danger" data-act="stop" data-id="' + esc(a.id) + '"' + (busy ? ' disabled' : '') + '>停止挂机</button>'
++            : '<button class="btn btn-primary" data-act="start" data-id="' + esc(a.id) + '"' + (busy ? ' disabled' : '') + '>开始挂机</button>') +
++          '<button class="btn btn-ghost" data-act="logs" data-id="' + esc(a.id) + '">看日志</button>' +
++        '</div>' +
++      '</div>';
++    }).join('');
++  }
++
++  function loadAccounts(quiet) {
++    if (!state.token) { showLogin(); return Promise.resolve(); }
++    if (!quiet) $('refresh').firstElementChild.classList.add('spin');
++    return api('/api/accounts').then(function (res) {
++      var data = (res && res.data) || {};
++      state.accounts = Array.isArray(data.accounts) ? data.accounts : [];
++      if (!state.accountId && state.accounts.length) {
++        state.accountId = String(state.accounts[0].id);
++        localStorage.setItem(ACCOUNT_KEY, state.accountId);
++      }
++      renderAccounts();
++      setConn(true, '已连接 · ' + state.accounts.length + ' 个账号');
++    }).catch(function (err) {
++      if (err.unauthorized) { showLogin('登录已过期，请重新登录'); return; }
++      setConn(false, err.message || '连接失败');
++      if (!quiet) toast(err.message || '连接失败');
++    }).finally(function () {
++      $('refresh').firstElementChild.classList.remove('spin');
++    });
++  }
++
++  function loadLogs(limit) {
++    var box = $('logs');
++    box.innerHTML = '<div class="empty">读取中…</div>';
++    return api('/api/account-logs?limit=' + (limit || 40)).then(function (list) {
++      if (!Array.isArray(list) || !list.length) {
++        box.innerHTML = '<div class="empty">暂无日志</div>';
++        return;
++      }
++      box.innerHTML = list.map(function (item) {
++        var t = String(item.time || '');
++        var hhmm = t.length >= 16 ? t.slice(11, 16) : t;
++        return '<div class="log">' +
++          '<time>' + esc(hhmm) + '</time>' +
++          '<div class="body">' +
++            '<div class="tag">' + esc(item.action || '') + '</div>' +
++            '<div class="msg">' + esc(item.msg || '') + '</div>' +
++            (item.reason ? '<div class="reason">' + esc(item.reason) + '</div>' : '') +
++          '</div>' +
++        '</div>';
++      }).join('');
++    }).catch(function (err) {
++      box.innerHTML = '<div class="empty">' + esc(err.message || '读取失败') + '</div>';
++    });
++  }
++
++  function loadVersion() {
++    fetch('/api/game-version').then(function (r) { return r.json(); }).then(function (d) {
++      $('verText').textContent = '面板 ' + (d.botVersion || '?') + ' · 客户端 ' + (d.clientVersion || '?');
++    }).catch(function () {
++      $('verText').textContent = '读取失败';
++    });
++  }
++
++  function control(id, act) {
++    if (state.busy[id]) return;
++    if (act === 'stop' && !confirm('确定停止这个账号的挂机吗？')) return;
++    state.busy[id] = true;
++    renderAccounts();
++    api('/api/accounts/' + encodeURIComponent(id) + '/' + act, { method: 'POST' })
++      .then(function () {
++        toast(act === 'start' ? '已开始挂机' : '已停止挂机');
++        return loadAccounts(true);
++      })
++      .catch(function (err) {
++        toast(err.message || '操作失败');
++      })
++      .finally(function () {
++        delete state.busy[id];
++        renderAccounts();
++      });
++  }
++
++  function switchView(view) {
++    document.querySelectorAll('main > section').forEach(function (s) {
++      s.classList.toggle('active', s.id === 'view-' + view);
++    });
++    document.querySelectorAll('.tabs button').forEach(function (b) {
++      b.classList.toggle('active', b.dataset.view === view);
++    });
++    if (view === 'logs' && state.token) loadLogs();
++    if (view === 'more') loadVersion();
++    window.scrollTo(0, 0);
++  }
++
++  // 事件绑定
++  document.querySelectorAll('.tabs button').forEach(function (b) {
++    b.addEventListener('click', function () { switchView(b.dataset.view); });
++  });
++
++  $('refresh').addEventListener('click', function () {
++    loadAccounts();
++    if ($('view-logs').classList.contains('active')) loadLogs();
++    toast('已刷新');
++  });
++
++  $('accounts').addEventListener('click', function (e) {
++    var btn = e.target.closest('button[data-act]');
++    if (!btn) return;
++    var id = btn.dataset.id;
++    var act = btn.dataset.act;
++    if (act === 'logs') {
++      state.accountId = String(id);
++      localStorage.setItem(ACCOUNT_KEY, state.accountId);
++      switchView('logs');
++      return;
++    }
++    control(id, act);
++  });
++
++  $('loginForm').addEventListener('submit', function (e) {
++    e.preventDefault();
++    var username = $('u').value.trim();
++    var password = $('p').value;
++    if (!username || !password) { $('loginErr').textContent = '请输入用户名和密码'; return; }
++    $('loginBtn').disabled = true;
++    $('loginErr').textContent = '';
++    fetch('/api/login', {
++      method: 'POST',
++      headers: { 'Content-Type': 'application/json' },
++      body: JSON.stringify({ username: username, password: password }),
++    }).then(function (res) {
++      return res.json().then(function (data) { return { res: res, data: data }; });
++    }).then(function (r) {
++      if (!r.res.ok || !r.data || !r.data.ok) {
++        throw new Error((r.data && (r.data.error || r.data.message)) || '登录失败');
++      }
++      state.token = r.data.data.token;
++      localStorage.setItem(TOKEN_KEY, state.token);
++      document.body.classList.remove('logged-out');
++      $('p').value = '';
++      switchView('accounts');
++      return loadAccounts();
++    }).catch(function (err) {
++      $('loginErr').textContent = err.message || '登录失败';
++    }).finally(function () {
++      $('loginBtn').disabled = false;
++    });
++  });
++
++  $('logout').addEventListener('click', function () {
++    if (!confirm('退出登录？下次需要重新输入密码。')) return;
++    api('/api/logout', { method: 'POST' }).catch(function () {});
++    showLogin('');
++  });
++
++  // 自动刷新：页面可见时每 10 秒同步一次账号状态
++  function startTimer() {
++    clearInterval(state.timer);
++    state.timer = setInterval(function () {
++      if (document.hidden || !state.token) return;
++      if ($('view-accounts').classList.contains('active')) loadAccounts(true);
++      else if ($('view-logs').classList.contains('active')) loadLogs();
++    }, 10000);
++  }
++  document.addEventListener('visibilitychange', function () {
++    if (!document.hidden && state.token && $('view-accounts').classList.contains('active')) loadAccounts(true);
++  });
++
++  if (state.token) { switchView('accounts'); loadAccounts(); } else { showLogin(''); }
++  startTimer();
++})();
++</script>
++</body>
++</html>
+diff --git a/web/public/m/manifest.webmanifest b/web/public/m/manifest.webmanifest
+new file mode 100644
+index 0000000..96b01c4
+--- /dev/null
++++ b/web/public/m/manifest.webmanifest
+@@ -0,0 +1,26 @@
++{
++  "name": "农场助手",
++  "short_name": "农场助手",
++  "description": "QQ 农场挂机状态、账号启停与日志",
++  "lang": "zh-CN",
++  "start_url": "/m/",
++  "scope": "/",
++  "display": "standalone",
++  "orientation": "portrait",
++  "background_color": "#f4f7f2",
++  "theme_color": "#2e7d32",
++  "icons": [
++    {
++      "src": "/icon.png",
++      "sizes": "1024x1024",
++      "type": "image/png",
++      "purpose": "any"
++    },
++    {
++      "src": "/icon.svg",
++      "sizes": "any",
++      "type": "image/svg+xml",
++      "purpose": "any"
++    }
++  ]
++}
 diff --git a/web/src/components/settings/AutomationSettingsForm.vue b/web/src/components/settings/AutomationSettingsForm.vue
 index 2b26a48..b585f46 100644
 --- a/web/src/components/settings/AutomationSettingsForm.vue
