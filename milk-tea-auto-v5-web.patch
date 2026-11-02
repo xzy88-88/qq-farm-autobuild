@@ -1863,10 +1863,10 @@ index 0000000..b7311c4
 +2026-10-28 v4 同时保留好友关系拒绝保护：收到 Farming 的 1001048 后停止该目标的剩余请求（不再逐块重试），临时冷却 10 分钟并重新读取好友列表。已完成的操作保留真实统计，不修改已知好友 GID 或永久黑名单。普通批量失败仍保留原兜底。
 diff --git a/web/public/m/index.html b/web/public/m/index.html
 new file mode 100644
-index 0000000..0b11901
+index 0000000..09fa856
 --- /dev/null
 +++ b/web/public/m/index.html
-@@ -0,0 +1,605 @@
+@@ -0,0 +1,606 @@
 +<!doctype html>
 +<html lang="zh-CN">
 +<head>
@@ -2294,8 +2294,9 @@ index 0000000..0b11901
 +      setConn(true, '已连接 · ' + state.accounts.length + ' 个账号');
 +    }).catch(function (err) {
 +      if (err.unauthorized) { showLogin('登录已过期，请重新登录'); return; }
-+      setConn(false, err.message || '连接失败');
-+      if (!quiet) toast(err.message || '连接失败');
++      if (window.console) console.log('[net]', err && err.message);
++      setConn(false, '连接失败 · 点右上角刷新重试');
++      if (!quiet) toast('连接失败，请检查网络后重试');
 +    }).finally(function () {
 +      $('refresh').firstElementChild.classList.remove('spin');
 +    });
