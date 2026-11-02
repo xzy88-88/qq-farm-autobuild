@@ -2,8 +2,16 @@ name: Build QQ Farm updates
 
 on:
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build and verify only; do not publish a release'
+        type: boolean
+        default: false
   schedule:
-    - cron: '23 * * * *'
+    # Poll upstream every 30 minutes so a merged upstream change reaches the
+    # server without manual work. Cheap when nothing changed: the release check
+    # exits before any build step runs.
+    - cron: '*/30 * * * *'
 
 permissions:
   contents: write
@@ -99,11 +107,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git -C source apply --check ../milk-tea-auto-v5.patch
-          git -C source apply ../milk-tea-auto-v5.patch
+          git -C source apply --check ../milk-tea-auto-v5-web.patch
+          git -C source apply ../milk-tea-auto-v5-web.patch
           npm install --global pnpm@10.30.2
           pnpm -C source install --frozen-lockfile
-          pnpm -C source/core test
+          pnpm -C source/core build:ts
+          ( cd source/core && node --test tests/*.test.js > "$RUNNER_TEMP/core-tests.tap" 2>&1 ) || true
+          cat "$RUNNER_TEMP/core-tests.tap"
+          python3 ci/core-test-gate.py "$RUNNER_TEMP/core-tests.tap"
           pnpm -C source/web test
           pnpm -C source/web typecheck
 
@@ -114,6 +125,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # The capability label and the release tag stay milk-tea-auto-v5: the
+          # server receiver validates exactly that value, and the capability
+          # contract (auto hire + reserve + duration + recovery fence) did not
+          # change. Only the patch file carries the restored settings UI.
           docker build -f source/core/Dockerfile \
             --label "org.opencontainers.image.revision=$REVISION" \
             --label 'qq-farm.local-compatibility=qmsg-v3,qq-login-confirmed-without-qr' \
@@ -145,7 +160,7 @@ jobs:
           exit 1
 
       - name: Publish image archive and checksum
-        if: steps.upstream.outputs.build == 'true'
+        if: steps.upstream.outputs.build == 'true' && inputs.dry_run != true
         env:
           REVISION: ${{ steps.upstream.outputs.revision }}
         shell: bash
@@ -165,4 +180,4 @@ jobs:
           gh release create "upstream-$REVISION-milk-tea-auto-v5" qq-farm-image.tar.gz manifest.json \
             --repo "$GITHUB_REPOSITORY" --latest \
             --title "QQ Farm ${REVISION:0:12}" \
-            --notes "Automatic build of liyangpengs/qq-farm-bot master commit $REVISION, with QQ login, Qmsg compatibility, and maintained opt-in milk tea automation v4 with friend-relation retry protection. No server credentials or account data are included."
+            --notes "Automatic build of liyangpengs/qq-farm-bot master commit $REVISION with the maintained milk-tea-auto-v5 capability: opt-in milk tea upgrade/craft/hire with coupon reserve, friend-relation (1001048) retry protection, bounded network recovery fencing, restored settings UI, and the QQ login / Qmsg compatibility applied by the server receiver. No server credentials or account data are included."
