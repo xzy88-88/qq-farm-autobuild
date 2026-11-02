@@ -7,6 +7,12 @@ on:
         description: 'Build and verify only; do not publish a release'
         type: boolean
         default: false
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build.yml'
+      - 'milk-tea-auto-*.patch'
+      - 'ci/**'
   schedule:
     # Poll upstream every 30 minutes so a merged upstream change reaches the
     # server without manual work. Cheap when nothing changed: the release check
