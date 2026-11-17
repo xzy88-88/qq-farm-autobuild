@@ -1,6 +1,8 @@
 # qq-farm-autobuild
 自动跟踪 liyangpengs/qq-farm-bot 的 master 更新，云端构建并发布部署包。仓库不包含服务器凭据、农场账号或运行设置。
 
+2026-11-17: `ranch-maintained-v1` replaces the retired milk tea requirement. Builds current upstream ranch functionality with only the existing friend-1001048 cooldown and bounded network-recovery fences, QQ login/Qmsg compatibility, and refreshed upstream test fixtures. The transactional receiver is migrated with `install-ranch-receiver.py`; milk tea automation remains disabled in the existing account settings. The original five client/TSDK audit warnings remain explicit; additional test failures block publication.
+
 
 2026-10-23: v3 adds opt-in automatic friend hiring, configurable duration and a coupon reserve. Existing accounts remain opted out. The receiver migrates known v1/v2 installations while preserving transactional backup/rollback and LOGIN_FAILED hooks.
 

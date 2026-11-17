@@ -1,0 +1,777 @@
+diff --git a/core/src/controllers/admin/account-routes.ts b/core/src/controllers/admin/account-routes.ts
+index 07b9a5f..901ae62 100644
+--- a/core/src/controllers/admin/account-routes.ts
++++ b/core/src/controllers/admin/account-routes.ts
+@@ -7,6 +7,7 @@ export {};
+  */
+ 
+ const store = require('../../models/store');
++const { recoveryFence } = require('../../services/network-recovery-fence');
+ const { addOrUpdateAccount, deleteAccount } = store;
+ const { findAccountByRef } = require('../../services/account-resolver');
+ const { updateRuntimeConfig, getRuntimeConfig, getDefaultSystemConfig, getDevicePresets, getTimeZoneOptions } = require('../../config/config');
+@@ -48,6 +49,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
+             }
+ 
+             const accountId = String(target.id);
++            recoveryFence.mark(accountId);
+             const data = addOrUpdateAccount({ id: accountId, name: remark });
+             if (ctx.provider && typeof ctx.provider.setRuntimeAccountName === 'function') {
+                 ctx.provider.setRuntimeAccountName(accountId, remark);
+@@ -79,6 +81,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
+ 
+             const resolvedUpdateId = isUpdate ? resolveAccId(ctx, updateRef) : '';
+             const payload = isUpdate ? { ...body, id: resolvedUpdateId || String(updateRef) } : body;
++            if (isUpdate) recoveryFence.mark(String(payload.id));
+             let wasRunning = false;
+             if (isUpdate && ctx.provider.isAccountRunning) {
+                 wasRunning = ctx.provider.isAccountRunning(payload.id);
+@@ -135,6 +138,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
+ 
+             const before = ctx.provider.getAccounts();
+             const target = findAccountByRef(before.accounts || [], req.params.id);
++            recoveryFence.mark(resolvedId);
+             ctx.provider.stopAccount(resolvedId);
+             const data = deleteAccount(resolvedId);
+             if (ctx.provider.addAccountLog) {
+diff --git a/core/src/controllers/admin/farm-routes.ts b/core/src/controllers/admin/farm-routes.ts
+index 4b812fb..0c52a1a 100644
+--- a/core/src/controllers/admin/farm-routes.ts
++++ b/core/src/controllers/admin/farm-routes.ts
+@@ -9,6 +9,7 @@ export {};
+ 
+ const { getLevelExpProgress } = require('../../config/gameConfig');
+ const store = require('../../models/store');
++const { recoveryFence } = require('../../services/network-recovery-fence');
+ 
+ const {
+     createAuthRequired,
+@@ -536,7 +537,7 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
+     app.post('/api/accounts/:id/start', (req: Request, res: Response) => {
+         try {
+             const accountId = resolveAccId(ctx, req.params.id);
+-
++            recoveryFence.mark(accountId);
+             const ok = ctx.provider.startAccount(accountId);
+             if (!ok) {
+                 return res.status(404).json({ ok: false, error: 'Account not found' });
+@@ -551,7 +552,8 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
+     app.post('/api/accounts/:id/stop', (req: Request, res: Response) => {
+         try {
+             const accountId = resolveAccId(ctx, req.params.id);
+-
++            // Record explicit intent even when the worker is already offline.
++            recoveryFence.mark(accountId);
+             const ok = ctx.provider.stopAccount(accountId);
+             if (!ok) {
+                 return res.status(404).json({ ok: false, error: 'Account not found' });
+@@ -562,6 +564,31 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
+         }
+     });
+ 
++    app.get('/api/accounts/:id/network-recovery-state', authRequired, (req: Request, res: Response) => {
++        const id = resolveAccId(ctx, req.params.id);
++        const account = ctx.provider.getAccounts().accounts.find((a: any) => String(a.id) === id);
++        if (id !== '2' || !account) return res.status(404).json({ ok: false, error: 'RecoveryAccountNotEnabled' });
++        return res.json({ ok: true, data: {
++            fence: recoveryFence.snapshot(id, account),
++            online: ctx.provider.canRecoverNetworkAccount(id),
++        } });
++    });
++
++    app.post('/api/accounts/:id/recover-network', authRequired, (req: Request, res: Response) => {
++        try {
++            const id = resolveAccId(ctx, req.params.id);
++            const result = recoveryFence.recover(id, req.body, {
++                getAccount: (accountId: string) => ctx.provider.getAccounts().accounts.find((a: any) => String(a.id) === accountId),
++                isRunning: (accountId: string) => ctx.provider.isAccountRunning(accountId),
++                updateCode: (accountId: string, code: string) => store.addOrUpdateAccount({ id: accountId, code }),
++                start: (accountId: string) => ctx.provider.startAccount(accountId),
++            });
++            return res.status(result.ok ? 200 : 409).json(result);
++        } catch (e: any) {
++            handleApiError(res, e);
++        }
++    });
++
+     // API: 对自己农场的指定地块手动施一次化肥。
+     app.post('/api/farm/fertilize', async (req: Request, res: Response) => {
+         const id = getAccId(ctx, req);
+diff --git a/core/src/runtime/data-provider.ts b/core/src/runtime/data-provider.ts
+index 2a002cd..6da0651 100644
+--- a/core/src/runtime/data-provider.ts
++++ b/core/src/runtime/data-provider.ts
+@@ -445,6 +445,12 @@ function createDataProvider(options: DataProviderOptions) {
+             return true;
+         },
+ 
++        canRecoverNetworkAccount: (accountRef: string) => {
++            const id = resolveAccountRefId(accountRef);
++            const worker = id && workers[id];
++            return !!(worker && !worker.stopping && worker.status?.connection?.connected);
++        },
++
+         isAccountRunning: (accountRef: string) => {
+             const accountId = resolveAccountRefId(accountRef);
+             return !!(accountId && workers[accountId]);
+diff --git a/core/src/services/friend/visit-strategy.ts b/core/src/services/friend/visit-strategy.ts
+index 282caa2..88ebaaf 100644
+--- a/core/src/services/friend/visit-strategy.ts
++++ b/core/src/services/friend/visit-strategy.ts
+@@ -54,6 +54,33 @@ function schedulerRef(): any {
+ // ============ 内部状态 ============
+ let friendsListCache: any[] | null = null;
+ let friendsListCacheTime: number = 0;
++const notFriendCooldownUntil = new Map<number, number>();
++const NOT_FRIEND_COOLDOWN_MS = 10 * 60 * 1000;
++
++function isNotFriendError(error: any): boolean {
++    return Number(error?.code) === 1001048 || parseRpcErrorCode(error) === 1001048;
++}
++
++function isFriendCoolingDown(friendGid: any): boolean {
++    const gid = toNum(friendGid);
++    const until = notFriendCooldownUntil.get(gid);
++    if (!until) return false;
++    if (until <= Date.now()) { notFriendCooldownUntil.delete(gid); return false; }
++    return true;
++}
++
++function coolDownNotFriend(friendGid: number): void {
++    if (isFriendCoolingDown(friendGid)) return;
++    notFriendCooldownUntil.set(toNum(friendGid), Date.now() + NOT_FRIEND_COOLDOWN_MS);
++    for (const [gid, until] of notFriendCooldownUntil) {
++        if (until <= Date.now()) notFriendCooldownUntil.delete(gid);
++    }
++    // Refresh the authoritative list next time without editing known GIDs or the blacklist.
++    friendsListCacheTime = 0;
++    logWarn('好友', `游戏返回“不是好友”，暂停该目标 10 分钟并刷新好友列表（GID:${friendGid}）`, {
++        module: 'friend', event: '好友关系暂不可用', friendGid, code: 1001048, result: 'cooldown',
++    });
++}
+ 
+ function isProtectDog(dogInfo: any): boolean {
+     return toNum(dogInfo && (dogInfo.dog_id ?? dogInfo.dogId)) === PROTECT_DOG_ID;
+@@ -72,6 +99,7 @@ interface FarmingOutcome {
+     operationLimits: any[];
+     dogSkillGiftCount: number;
+     code?: number;
++    friendUnavailable?: boolean;
+ }
+ 
+ interface RecentHelpEntry {
+@@ -227,6 +255,10 @@ export function handleFriendEnterError(friendGid: any, friendName: string, error
+     const gid: number = toNum(friendGid);
+     const displayName: string = String(friendName || '').trim() || `GID:${gid}`;
+     const reason: string = String((error && error.message) || error || '');
++    if (isNotFriendError(error)) {
++        coolDownNotFriend(gid);
++        return { handled: true, kind: 'not_friend_cooldown' };
++    }
+     if (isEnterFarmBannedError(error)) {
+         addFriendToBlacklist(gid, displayName, reason);
+         return { handled: true, kind: 'blacklist' };
+@@ -394,7 +426,8 @@ export function buildFriendPetView(friendGid: any): { petState: FriendPetState;
+ 
+ // 宠物结论随时会被 Enter 回包刷新，所以不写进好友列表缓存，只在返回前附加
+ function withFriendPetView(list: any[]): any[] {
+-    return (Array.isArray(list) ? list : []).map((friend: any) => ({ ...friend, ...buildFriendPetView(friend.gid) }));
++    return (Array.isArray(list) ? list : []).filter((friend: any) => !isFriendCoolingDown(friend.gid))
++        .map((friend: any) => ({ ...friend, ...buildFriendPetView(friend.gid) }));
+ }
+ 
+ /**
+@@ -581,6 +614,12 @@ async function runFarmingWithFallback(
+         releaseRecentHelp(hostGid, unconfirmed);
+         return batch;
+     } catch (error) {
++        if (isNotFriendError(error)) {
++            releaseRecentHelp(hostGid, target);
++            coolDownNotFriend(hostGid);
++            if (propagateErrors) throw error;
++            return { ...emptyFarmingOutcome(), friendUnavailable: true };
++        }
+         if (propagateErrors) throw error;
+         releaseRecentHelp(hostGid, target);
+         const outcomes: FarmingOutcome[] = [];
+@@ -593,6 +632,12 @@ async function runFarmingWithFallback(
+                 else if (outcome.effect === 'confirmed') markRecentHelp(hostGid, outcome.landIds, 'confirmed', HELP_RESULT_TTL_MS, snapshotKey);
+                 else releaseRecentHelp(hostGid, [landId]);
+             } catch (error) {
++                if (isNotFriendError(error)) {
++                    releaseRecentHelp(hostGid, target);
++                    coolDownNotFriend(hostGid);
++                    if (propagateErrors) throw error;
++                    return { ...mergeFarmingOutcomes(outcomes), friendUnavailable: true };
++                }
+                 if (propagateErrors) throw error;
+                 releaseRecentHelp(hostGid, [landId]);
+             }
+@@ -609,6 +654,7 @@ async function runFarmingWithFallback(
+ export async function doFriendOperation(friendGid: any, opType: string, propagateErrors: boolean = false): Promise<any> {
+     const gid: number = toNum(friendGid);
+     if (!gid) return { ok: false, message: '无效好友ID', opType };
++    if (isFriendCoolingDown(gid)) return { ok: false, opType, count: 0, message: '该目标刚被游戏判定为非好友，暂缓操作 10 分钟' };
+     if (opType === 'bad' && schedulerRef().isBadOperationLimitReached()) {
+         return {
+             ok: true,
+@@ -631,6 +677,7 @@ export async function doFriendOperation(friendGid: any, opType: string, propagat
+         if (handled.handled && handled.kind === 'invalid_removed') {
+             return { ok: true, opType, count: 0, message: '好友 GID 已失效，已自动移出已知列表' };
+         }
++        if (handled.kind === 'not_friend_cooldown') return { ok: false, opType, count: 0, message: '游戏判定为非好友，暂缓操作 10 分钟' };
+         if (propagateErrors) throw e;
+         return { ok: false, message: `进入好友农场失败: ${e.message}`, opType };
+     }
+@@ -673,6 +720,8 @@ export async function doFriendOperation(friendGid: any, opType: string, propagat
+             const outcome: FarmingOutcome = await runFarmingWithFallback(gid, landIds, false, getHelpSnapshotKey(lands), propagateErrors);
+             count = outcome.landCount;
+             if (outcome.operationCount > 0) recordOperation('helpFarming', outcome.operationCount);
++            if (outcome.friendUnavailable) return { ok: false, opType, count, landCount: count,
++                operationCount: outcome.operationCount, message: `已完成 ${count} 块；游戏判定为非好友，剩余操作暂停 10 分钟` };
+             return {
+                 ok: true,
+                 opType,
+@@ -744,7 +793,7 @@ export async function doFriendOperation(friendGid: any, opType: string, propagat
+ interface VisitResult {
+     acted: boolean;
+     entered: boolean;
+-    status?: 'helped' | 'skipped_exp_limit' | 'protect_dog_bypass' | 'no_action' | 'enter_failed';
++    status?: 'helped' | 'skipped_exp_limit' | 'protect_dog_bypass' | 'no_action' | 'enter_failed' | 'not_friend_cooldown';
+     protectDogBypass?: boolean;
+ }
+ 
+@@ -768,6 +817,7 @@ export async function visitFriend(
+     options: VisitFriendOptions = {},
+ ): Promise<VisitResult> {
+     const { gid, name } = friend;
++    if (isFriendCoolingDown(gid)) return { acted: false, entered: false, status: 'not_friend_cooldown' };
+     const allowSteal: boolean = options.allowSteal !== false;
+     const allowBad: boolean = options.allowBad !== false;
+     const ignoreExpLimit: boolean = !!options.ignoreExpLimit;
+@@ -807,6 +857,7 @@ export async function visitFriend(
+         if (handled.handled && handled.kind === 'invalid_removed') {
+             return { acted: false, entered: false };
+         }
++        if (handled.kind === 'not_friend_cooldown') return { acted: false, entered: false, status: 'not_friend_cooldown' };
+         logWarn('好友', `进入 ${name} 农场失败: ${e.message}`, {
+             module: 'friend', event: '进入农场', result: 'error', friendName: name, friendGid: gid
+         });
+@@ -848,6 +899,13 @@ export async function visitFriend(
+                 totalActions.farming += outcome.landCount;
+                 recordOperation('helpFarming', outcome.operationCount);
+             }
++            if (outcome.friendUnavailable) {
++                if (actions.length) log('好友', `${name}: ${actions.join('/')}；关系已变化，暂停剩余操作`, {
++                    module: 'friend', event: '照顾好友', result: 'partial', friendGid: gid,
++                });
++                try { await leaveFriendFarm(gid); } catch { /* relationship rejection must not trigger more actions */ }
++                return { acted: actions.length > 0, entered: true, status: 'not_friend_cooldown' };
++            }
+         }
+     }
+ 
+diff --git a/core/src/services/network-recovery-fence.ts b/core/src/services/network-recovery-fence.ts
+new file mode 100644
+index 0000000..9be34cd
+--- /dev/null
++++ b/core/src/services/network-recovery-fence.ts
+@@ -0,0 +1,41 @@
++export {};
++
++const { createHash, randomUUID } = require('node:crypto');
++
++function createRecoveryFence() {
++    const epoch = randomUUID();
++    const versions = new Map<string, number>();
++    const mark = (id: string): void => { versions.set(String(id), (versions.get(String(id)) || 0) + 1); };
++    const snapshot = (id: string, account: any) => ({
++        epoch,
++        version: versions.get(String(id)) || 0,
++        codeHash: createHash('sha256').update(String(account?.code || '')).digest('hex'),
++    });
++    return {
++        mark,
++        snapshot,
++        // Every dependency is synchronous. No other HTTP handler can run between
++        // this comparison, the Code update and start in Node's event loop.
++        recover(id: string, body: any, adapter: any) {
++            if (String(id) !== '2') return { ok: false, error: 'RecoveryAccountNotEnabled' };
++            const account = adapter.getAccount(id);
++            const expected = body?.expected;
++            const code = String(body?.code || '').trim();
++            if (!account || account.platform !== 'qq' || adapter.isRunning(id)) {
++                return { ok: false, error: 'RecoveryStateChanged' };
++            }
++            const current = snapshot(id, account);
++            if (!expected || expected.epoch !== current.epoch
++                || expected.version !== current.version || expected.codeHash !== current.codeHash
++                || !code || code === String(account.code || '')) {
++                return { ok: false, error: 'RecoveryStateChanged' };
++            }
++            mark(id); // A snapshot is single use even if saving or starting fails.
++            adapter.updateCode(id, code);
++            if (!adapter.start(id)) return { ok: false, error: 'RecoveryStartFailed' };
++            return { ok: true };
++        },
++    };
++}
++
++module.exports = { createRecoveryFence, recoveryFence: createRecoveryFence() };
+diff --git a/core/tests/charity-red-flower-proto.test.js b/core/tests/charity-red-flower-proto.test.js
+index e143b30..485d3a9 100644
+--- a/core/tests/charity-red-flower-proto.test.js
++++ b/core/tests/charity-red-flower-proto.test.js
+@@ -24,7 +24,7 @@ test('charity red flower requests reproduce the capture-verified selectors', asy
+     assert.equal(encode({ operate_type: 36, donate_love: {} }), '0895e38ec6071024ba0800');
+     assert.equal(encode({ operate_type: 37, claim_progress_reward: { target: 30 } }), '0895e38ec6071025c20802081e');
+     assert.equal(encode({ operate_type: 38, send_public_fund: {} }), '0895e38ec6071026ca0800');
+-    assert.equal(encode({ operate_type: 39, query: { accepted: true } }), '0895e38ec6071027d208020801');
++    assert.equal(encode({ operate_type: 39, agreement: { accepted: true } }), '0895e38ec6071027d208020801');
+ });
+ 
+ test('charity red flower reward replies decode the verified result selectors', async () => {
+diff --git a/core/tests/email-daily-persistence.test.js b/core/tests/email-daily-persistence.test.js
+index 8b421a3..4cc2396 100644
+--- a/core/tests/email-daily-persistence.test.js
++++ b/core/tests/email-daily-persistence.test.js
+@@ -207,6 +207,7 @@ test('上游 Worker 的登录与跨日强制任务遵守邮箱时刻，同日整
+         '../config/config': { CONFIG: { timeZone: 'Asia/Shanghai' } },
+         '../models/store': { getAutomation: () => ({}), applyConfigSnapshot: value => value },
+         '../services/email': email,
++        '../services/ranch/automation': { getRoutineState: () => ({ doneToday: true, nextCheckAt: Infinity }), run: async () => {} },
+         '../services/status': { setRecordGoldExpHook: noop },
+         '../services/automation-lock': require('../dist/services/automation-lock'),
+         '../services/scheduler': { createScheduler: () => ({ clear: noop, setIntervalTask: (_name, ms, fn) => {
+diff --git a/core/tests/farm-interaction-cleanup.test.js b/core/tests/farm-interaction-cleanup.test.js
+index 7d48855..7604210 100644
+--- a/core/tests/farm-interaction-cleanup.test.js
++++ b/core/tests/farm-interaction-cleanup.test.js
+@@ -100,7 +100,7 @@ test('crystal mutation uses the latest official effect_name mapping', () => {
+     const effect = getMutantEffectById(14);
+     assert.equal(effect.name, '晶辉');
+     assert.equal(effect.icon, 'crystal');
+-    assert.equal(effect.description, '紫晶土地上随机出现');
++    assert.equal(effect.description, '紫晶及以上土地上随机出现');
+ 
+     const detail = buildLandDetail(growingLand(14, 0, {
+         mutant_config_ids: [14],
+diff --git a/core/tests/friend-not-friend-retry.test.js b/core/tests/friend-not-friend-retry.test.js
+new file mode 100644
+index 0000000..ca42558
+--- /dev/null
++++ b/core/tests/friend-not-friend-retry.test.js
+@@ -0,0 +1,120 @@
++const assert = require('node:assert/strict');
++const fs = require('node:fs');
++const path = require('node:path');
++const vm = require('node:vm');
++const test = require('node:test');
++
++// Exercise the real visit strategy. Only its service boundaries and clock are replaced;
++// no requests, account settings, or persistent friend lists are changed by these tests.
++function harness() {
++    let now = 1000000;
++    let failure = () => Object.assign(new Error('不是好友无法操作'), { code: 1001048 });
++    const calls = { enter: [], leave: [], farming: [], steal: [], bad: [], lists: 0, settings: [], logs: [], stats: [] };
++    const flags = { friend_help: true, friend_help_exp_limit: false, friend_steal: false, friend_bad: false };
++    const friends = [{ gid: 20, name: 'target' }, { gid: 21, name: 'other' }];
++    const lands = [1, 2].map(id => ({ id, plant: { id: 10, phases: [{ phase: 2 }], dry_num: 1 } }));
++    const successful = ids => ({ effect: 'confirmed', operationCount: ids.length, landCount: ids.length, landIds: ids, operationLimits: [], dogSkillGiftCount: 0 });
++    const modules = {
++        '../../config/config': { PlantPhase: { MATURE: 6, DEAD: 7 } },
++        '../../config/gameConfig': { getPlantName: () => 'plant', getPlantById: () => ({}), getItemById: () => ({}), getItemImageById: () => '' },
++        '../../models/store': { isAutomationOn: key => flags[key], getFriendQuietHours: () => ({}), getFriendBlacklist: () => [], getPlantBlacklist: () => [], getFriendsListCacheTtlSec: () => 60 },
++        '../../utils/network': { getUserState: () => ({ gid: 999, accountId: 'test' }) },
++        '../../utils/utils': { toNum: v => Number(v) || 0, getServerTimeSec: () => now / 1000, getSystemClockMinutes: () => 0,
++            log: (...args) => calls.logs.push(args), logWarn: (...args) => calls.logs.push(args), sleep: async () => {}, randomDelay: async () => {} },
++        '../farm': { getCurrentPhase: phases => phases[0], buildLandMap: () => new Map(), buildLandDetail: () => ({}),
++            getPlantStatusFlags: plant => ({ needWater: !!plant.dry_num }), isOccupiedSlaveLand: () => false },
++        '../career': { getCareerInfoOrNull: () => null }, '../stats': { recordOperation: (...args) => calls.stats.push(args) },
++        '../warehouse': { sellAllFruits: async () => {} },
++        './api': {
++            getAllFriends: async () => { calls.lists++; return { friends }; },
++            enterFriendFarm: async gid => { calls.enter.push(gid); return { lands }; },
++            leaveFriendFarm: async gid => { calls.leave.push(gid); },
++            helpFarming: async (gid, ids) => { calls.farming.push({ gid, ids: Array.from(ids) }); const error = failure(gid, ids); if (error) throw error; return successful(ids); },
++            stealHarvest: async gid => { calls.steal.push(gid); },
++            putInsects: async gid => { calls.bad.push(gid); return 1; },
++            putWeeds: async gid => { calls.bad.push(gid); return 1; },
++        },
++        './gid-manager': { extractReplyFriends: reply => reply.friends || [], postToMaster: value => { calls.settings.push(value); return true; }, removeKnownFriendGid: (...args) => calls.settings.push(args) },
++        './pet-cache': { PROTECT_DOG_ID: 1, getFriendDogState: () => 'unknown', getFriendDogId: () => 0 },
++        './scheduler': { setCanGetHelpExp: () => {}, getCanGetHelpExp: () => true, canGetExpByCandidates: () => true, isBadOperationLimitReached: () => false, getRemainingBadOperationTimes: () => 10 },
++    };
++    const module = { exports: {} };
++    class FakeDate extends Date { static now() { return now; } }
++    vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../dist/services/friend/visit-strategy.js'), 'utf8'),
++        { require: name => { if (!(name in modules)) throw new Error(`Unexpected dependency: ${name}`); return modules[name]; }, module, exports: module.exports, process: { env: {} }, Date: FakeDate, console });
++    const service = module.exports;
++    const visit = (gid = 20) => service.visitFriend({ gid, name: `friend${gid}` }, { steal: 0, farming: 0, putBug: 0, putWeed: 0 }, 999, 'test');
++    return { service, calls, flags, lands, visit, setFailure: fn => failure = fn, advance: ms => now += ms };
++}
++
++for (const structured of [true, false]) {
++    test(`not-friend ${structured ? 'typed code' : 'gateway message'} stops batch fallback, later actions and following visits`, async () => {
++        const h = harness(); h.flags.friend_bad = true;
++        if (!structured) h.setFailure(() => new Error('gamepb.plantpb.PlantService.Farming code=1001048 不是好友无法操作'));
++        const result = await h.visit();
++        assert.equal(result.acted, false);
++        assert.equal(h.calls.farming.length, 1);
++        assert.equal(h.calls.bad.length, 0);
++        assert.deepEqual(h.calls.leave, [20]);
++        h.service.clearFriendsListCache();
++        await h.visit();
++        assert.deepEqual(h.calls.enter, [20]);
++        assert.equal(h.calls.settings.length, 0, 'temporary rejection must not delete or blacklist friends');
++    });
++}
++
++test('cooldown filters a stale refreshed friend list, affects only the target and expires after ten minutes', async () => {
++    const h = harness(); await h.service.getFriendsList();
++    await h.visit();
++    const friends = await h.service.getFriendsList();
++    assert.deepEqual(Array.from(friends, f => f.gid), [21]);
++    assert.equal(h.calls.lists, 2, 'a rejection must invalidate the list cache');
++    h.setFailure(() => null);
++    await h.visit(21);
++    assert.deepEqual(h.calls.enter, [20, 21]);
++    h.advance(599999); await h.visit(20);
++    assert.deepEqual(h.calls.enter, [20, 21]);
++    h.advance(1); await h.visit(20);
++    assert.deepEqual(h.calls.enter, [20, 21, 20]);
++    assert.equal(h.calls.settings.length, 0);
++});
++
++test('a not-friend response during per-land fallback stops the remaining land requests', async () => {
++    const h = harness();
++    h.setFailure((_gid, ids) => ids.length > 1 ? new Error('batch rejected') : Object.assign(new Error('不是好友无法操作'), { code: 1001048 }));
++    await h.visit();
++    assert.deepEqual(h.calls.farming.map(v => v.ids), [[1, 2], [1]]);
++    assert.deepEqual(h.calls.leave, [20]);
++});
++
++test('ordinary batch errors retain the existing per-land fallback', async () => {
++    const h = harness(); h.setFailure((_gid, ids) => ids.length > 1 ? new Error('ordinary batch rejected') : null);
++    const result = await h.visit();
++    assert.equal(result.acted, true);
++    assert.deepEqual(h.calls.farming.map(v => v.ids), [[1, 2], [1], [2]]);
++});
++
++test('manual farming propagates the rejection while still suppressing subsequent requests', async () => {
++    const h = harness();
++    await assert.rejects(h.service.doFriendOperation(20, 'farming', true), /不是好友/);
++    assert.deepEqual(h.calls.leave, [20]);
++    await h.visit();
++    assert.deepEqual(h.calls.enter, [20]);
++});
++
++for (const manual of [false, true]) {
++    test(`${manual ? 'manual' : 'automatic'} fallback retains confirmed partial success before a not-friend rejection`, async () => {
++        const h = harness(); h.flags.friend_bad = true; h.flags.friend_steal = true;
++        h.lands.push({ id: 3, plant: { id: 10, phases: [{ phase: 2 }], dry_num: 1 } });
++        h.setFailure((_gid, ids) => ids.length > 1 ? new Error('ordinary batch error')
++            : ids[0] === 2 ? Object.assign(new Error('不是好友无法操作'), { code: 1001048 }) : null);
++        const result = manual ? await h.service.doFriendOperation(20, 'farming') : await h.visit();
++        if (manual) { assert.equal(result.ok, false); assert.equal(result.count, 1); }
++        else assert.equal(result.acted, true);
++        assert.deepEqual(h.calls.farming.map(v => v.ids), [[1, 2, 3], [1], [2]]);
++        assert.deepEqual(h.calls.stats, [['helpFarming', 1]]);
++        assert.deepEqual(h.calls.leave, [20]);
++        assert.deepEqual(h.calls.bad, []);
++        assert.deepEqual(h.calls.steal, []);
++    });
++}
+diff --git a/core/tests/land-upgrade.test.js b/core/tests/land-upgrade.test.js
+index 2ec1724..f6465f3 100644
+--- a/core/tests/land-upgrade.test.js
++++ b/core/tests/land-upgrade.test.js
+@@ -5,8 +5,8 @@ const { buildLandUpgradeDetail } = require('../dist/services/farm/land-upgrade')
+ test('land 21 keeps the exact server level and currency conditions and compares gold to crystal bonuses', () => {
+     const info = buildLandUpgradeDetail({ id: 21, unlocked: true, level: 4, max_level: 5,
+         buff: { plant_yield_bonus: 30000, planting_time_reduction: 2000, plant_exp_bonus: 2000 },
+-        upgrade_condition: { condition_type: 1, condition_value: 150,
+-            required_items: [{ id: 1001, count: '450000000' }, { id: 1005, count: '18670' }] } });
++        upgrade_condition: { preceeding_lands_count_need: 1, level_need: 150,
++            items_need: [{ id: 1001, count: '450000000' }, { id: 1005, count: '18670' }] } }, new Map([[1, { unlocked: true, level: 4 }]]));
+     assert.equal(info.needLevel, 150);
+     assert.deepEqual(info.costs.map(c => [c.id, c.count]), [['1001', '450000000'], ['1005', '18670']]);
+     assert.equal(info.current.expBonus, 20);
+@@ -34,11 +34,12 @@ test('unlocking shows prerequisite land and exact price instead of upgrade requi
+     assert.equal(buildLandUpgradeDetail(raw).prerequisite.met, false);
+ });
+ 
+-test('unknown server condition types stay unknown; known official fallback does not imply upgrade permission', () => {
++test('missing server level stays unknown; known official fallback does not imply upgrade permission', () => {
+     const info = buildLandUpgradeDetail({ id: 21, unlocked: true, level: 4, max_level: 5,
+-        upgrade_condition: { condition_type: 99, condition_value: 150, required_items: [] } });
++        upgrade_condition: { preceeding_lands_count_need: 1, items_need: [] } });
+     assert.equal(info.unknown, true);
+-    assert.equal(info.needLevel, null);
++    assert.equal(info.needLevel, 0);
++    assert.equal(info.serverAllowed, false);
+     const fallback = buildLandUpgradeDetail({ id: 21, unlocked: true, level: 4, max_level: 5 });
+     assert.equal(fallback.needLevel, 150);
+     assert.equal(fallback.serverAllowed, false);
+diff --git a/core/tests/milk-tea.test.js b/core/tests/milk-tea.test.js
+index 11b8de0..73959e9 100644
+--- a/core/tests/milk-tea.test.js
++++ b/core/tests/milk-tea.test.js
+@@ -28,7 +28,7 @@ function harness() {
+     mock('utils/network', { sendMsgAsync: async (_service, method, body) => {
+         if (method === 'GetGroup') {
+             if (failRefresh && writes) throw new Error('offline');
+-            return { body: encode(types.MilkTeaGetGroupReply, { group: { head: { activity_id: '2026110100' }, children: [milk, { head: { activity_id: '2026110102' }, shop: { goods: [goods] } }, { head: { activity_id: '2026110103' }, growth_fund: fund }] } }) };
++            return { body: encode(types.MilkTeaGetGroupReply, { group: { head: { activity_id: '2026110100' }, children: [milk, { head: { activity_id: '2026110102', begin_time: 1792029600, end_time: 1794844799 }, shop: { goods: [goods] } }, { head: { activity_id: '2026110103' }, growth_fund: fund }] } }) };
+         }
+         const req = types.MilkTeaOperateRequest.toObject(types.MilkTeaOperateRequest.decode(body), { longs: String });
+         const cmd = Number(req.operate_type);
+@@ -81,7 +81,7 @@ test('craft consumes complete UID stacks and rejects locked, changed or duplicat
+     assert.deepEqual(result.result.crafted_cups, { 2: 20 });
+     assert.deepEqual(h.calls[0].milk_tea_craft, { fruit_uids: ['900'] });
+ });
+-test('shop retains finite limits and enforces level, price and settlement conditions', async () => {
++test('shop retains finite limits, level and price checks and the full exchange window', async () => {
+     const h = harness();
+     assert.equal((await h.service.getMilkTeaActivity('exchange')).goods[0].remaining, 106);
+     h.goods.cond_hints = [{ cond_type: 'level', current: 1, target: 3, satisfied: false }];
+@@ -89,8 +89,15 @@ test('shop retains finite limits and enforces level, price and settlement condit
+     h.goods.cond_hints = [];
+     await assert.rejects(h.service.operateMilkTeaActivity('exchange', { goodsId: 301, count: 1, expectedCosts: [{ id: 1001, count: 1 }] }), /费用已变化/);
+     h.setTime(1794672000);
+-    await assert.rejects(h.service.operateMilkTeaActivity('exchange', { goodsId: 301, count: 1, expectedCosts: h.goods.cost }), /条件/);
+-    assert.equal(h.calls.length, 0);
++    await h.service.operateMilkTeaActivity('exchange', { goodsId: 301, count: 1, expectedCosts: h.goods.cost });
++    assert.equal(h.calls.length, 1);
++    assert.equal(Number(h.calls[0].shop_buy.goods_id), 301);
++    assert.equal(Number(h.calls[0].shop_buy.count), 1);
++    h.setTime(1794844799);
++    await assert.rejects(h.service.operateMilkTeaActivity('exchange', { goodsId: 301, count: 1, expectedCosts: h.goods.cost }), /活动尚未开放或已经结束/);
++    h.setTime(1792029599);
++    await assert.rejects(h.service.operateMilkTeaActivity('exchange', { goodsId: 301, count: 1, expectedCosts: h.goods.cost }), /活动尚未开放或已经结束/);
++    assert.equal(h.calls.length, 1);
+ });
+ test('fund unlock is serialized and claims require paid unlock without duplicate charges', async () => {
+     const h = harness();
+diff --git a/core/tests/network-recovery-fence.test.js b/core/tests/network-recovery-fence.test.js
+new file mode 100644
+index 0000000..fd1d2de
+--- /dev/null
++++ b/core/tests/network-recovery-fence.test.js
+@@ -0,0 +1,83 @@
++const test = require('node:test');
++const assert = require('node:assert/strict');
++const { createRecoveryFence } = require('../dist/services/network-recovery-fence');
++
++function fixture() {
++    const fence = createRecoveryFence();
++    let record = { id: '2', name: 'existing', platform: 'qq', code: 'old-code', marker: 'preserved' };
++    let running = false;
++    let writes = 0;
++    const adapter = {
++        getAccount: id => id === record.id ? { ...record } : null,
++        isRunning: () => running,
++        updateCode: (id, code) => { assert.equal(id, '2'); record.code = code; writes++; },
++        start: id => { assert.equal(id, '2'); running = true; return true; },
++    };
++    const body = () => ({ expected: fence.snapshot('2', record), code: 'new-code' });
++    return { fence, adapter, body, record: () => record, running: () => running,
++        writes: () => writes, setRunning: value => { running = value; } };
++}
++
++test('conditional recovery updates and starts existing account 2 while retaining other fields', () => {
++    const f = fixture();
++    assert.equal(f.fence.recover('2', f.body(), f.adapter).ok, true);
++    assert.equal(f.record().code, 'new-code');
++    assert.equal(f.record().marker, 'preserved');
++    assert.equal(f.running(), true);
++});
++
++test('a manual stop after snapshot invalidates recovery even if already stopped', () => {
++    const f = fixture(); const body = f.body();
++    f.fence.mark('2');
++    assert.equal(f.fence.recover('2', body, f.adapter).ok, false);
++    assert.equal(f.writes(), 0);
++    assert.equal(f.running(), false);
++});
++
++test('manual intent on another account does not invalidate account 2', () => {
++    const f = fixture(); const body = f.body();
++    f.fence.mark('1');
++    assert.equal(f.fence.recover('2', body, f.adapter).ok, true);
++});
++
++test('a changed credential before the atomic operation is not overwritten', () => {
++    const f = fixture(); const body = f.body();
++    f.record().code = 'user-code';
++    assert.equal(f.fence.recover('2', body, f.adapter).ok, false);
++    assert.equal(f.record().code, 'user-code');
++    assert.equal(f.writes(), 0);
++});
++
++test('a manual start before recovery is not restarted', () => {
++    const f = fixture(); const body = f.body();
++    f.setRunning(true);
++    assert.equal(f.fence.recover('2', body, f.adapter).ok, false);
++    assert.equal(f.writes(), 0);
++});
++
++test('a previous process epoch cannot recover after panel restart', () => {
++    const f = fixture(); const body = f.body();
++    const fresh = createRecoveryFence();
++    assert.equal(fresh.recover('2', body, f.adapter).ok, false);
++    assert.equal(f.writes(), 0);
++});
++
++test('reusing a consumed recovery snapshot cannot write a second time', () => {
++    const f = fixture(); const body = f.body();
++    assert.equal(f.fence.recover('2', body, f.adapter).ok, true);
++    f.setRunning(false);
++    assert.equal(f.fence.recover('2', body, f.adapter).ok, false);
++    assert.equal(f.writes(), 1);
++});
++
++test('other account, missing preconditions and empty or reused Code cannot recover', () => {
++    for (const change of [b => { b.expected = null; }, b => { b.code = ''; },
++                          b => { b.code = 'old-code'; }, b => { b.expected.version = -1; }]) {
++        const f = fixture(); const body = f.body(); change(body);
++        assert.equal(f.fence.recover('2', body, f.adapter).ok, false);
++        assert.equal(f.writes(), 0);
++    }
++    const f = fixture();
++    assert.equal(f.fence.recover('1', f.body(), f.adapter).ok, false);
++    assert.equal(f.writes(), 0);
++});
+diff --git a/core/tests/network-recovery-routes.test.js b/core/tests/network-recovery-routes.test.js
+new file mode 100644
+index 0000000..db5f84b
+--- /dev/null
++++ b/core/tests/network-recovery-routes.test.js
+@@ -0,0 +1,101 @@
++const test = require('node:test');
++const assert = require('node:assert/strict');
++const fs = require('node:fs');
++const path = require('node:path');
++const vm = require('node:vm');
++const { createRecoveryFence } = require('../dist/services/network-recovery-fence');
++
++function setup() {
++    const fence = createRecoveryFence();
++    const accounts = [{ id: '2', name: 'existing', platform: 'qq', code: 'old', marker: 'keep' }];
++    let running = false;
++    let stopping = false;
++    let writes = 0;
++    const routes = new Map();
++    const auth = (_req, _res, next) => next();
++    const app = Object.fromEntries(['get', 'post', 'delete'].map(method => [method,
++        (route, ...handlers) => routes.set(method + ' ' + route, handlers)]));
++    const store = {
++        addOrUpdateAccount: data => {
++            Object.assign(accounts.find(a => a.id === data.id), data); writes++;
++            return { accounts };
++        },
++        deleteAccount: id => ({ accounts: accounts.filter(a => a.id !== id) }),
++    };
++    const middleware = {
++        createAuthRequired: () => auth,
++        resolveAccId: (_ctx, ref) => String(ref),
++        getAccountList: () => accounts,
++        handleApiError: (res, e) => res.status(500).json({ ok: false, error: e.message }),
++    };
++    const ctx = { provider: {
++        getAccounts: () => ({ accounts }),
++        isAccountRunning: () => running,
++        canRecoverNetworkAccount: () => running && !stopping,
++        startAccount: () => { running = true; return true; },
++        stopAccount: () => { stopping = true; running = false; return true; },
++        restartAccount: () => { running = true; },
++        addAccountLog: () => {},
++    } };
++    for (const file of ['farm-routes', 'account-routes']) {
++        const module = { exports: {} };
++        const source = fs.readFileSync(path.join(__dirname, '../dist/controllers/admin', file + '.js'), 'utf8');
++        vm.runInNewContext(source, {
++            module, exports: module.exports,
++            require: name => {
++                if (name.endsWith('/models/store')) return store;
++                if (name.endsWith('/services/network-recovery-fence')) return { recoveryFence: fence };
++                if (name === './middleware') return middleware;
++                if (name.endsWith('/services/account-resolver')) return { findAccountByRef: (list, ref) => list.find(a => a.id === String(ref)) };
++                if (name.endsWith('/config/config') || name.endsWith('/config/gameConfig')) return {};
++                throw new Error('Unexpected route dependency ' + name);
++            },
++        });
++        module.exports[file === 'farm-routes' ? 'mountFarmRoutes' : 'mountAccountRoutes'](app, ctx);
++    }
++    const call = (method, route, body = {}) => {
++        let result;
++        let status = 200;
++        const res = { status: value => { status = value; return res; }, json: value => { result = value; return res; } };
++        const handlers = routes.get(method + ' ' + route);
++        handlers.at(-1)({ params: { id: '2' }, body, headers: {}, query: {} }, res);
++        return { status, result };
++    };
++    return { call, accounts, routes, auth, running: () => running, writes: () => writes,
++        setRunning: value => { running = value; }, setStopping: value => { stopping = value; } };
++}
++
++const STATE = '/api/accounts/:id/network-recovery-state';
++const RECOVER = '/api/accounts/:id/recover-network';
++
++test('new recovery endpoints require authentication and atomic operation preserves fields', () => {
++    const f = setup();
++    assert.equal(f.routes.get('get ' + STATE)[0], f.auth);
++    assert.equal(f.routes.get('post ' + RECOVER)[0], f.auth);
++    const expected = f.call('get', STATE).result.data.fence;
++    assert.equal(f.call('post', RECOVER, { expected, code: 'fresh' }).status, 200);
++    assert.equal(f.accounts[0].marker, 'keep');
++    assert.equal(f.accounts[0].code, 'fresh');
++    assert.equal(f.running(), true);
++});
++
++test('real Stop route invalidates recovery even for an already stopped account', () => {
++    const f = setup(); const expected = f.call('get', STATE).result.data.fence;
++    assert.equal(f.call('post', '/api/accounts/:id/stop').status, 200);
++    assert.equal(f.call('post', RECOVER, { expected, code: 'fresh' }).status, 409);
++    assert.equal(f.writes(), 0);
++    assert.equal(f.running(), false);
++});
++
++test('real account update route invalidates snapshot and preserves user authorization', () => {
++    const f = setup(); const expected = f.call('get', STATE).result.data.fence;
++    const update = f.call('post', '/api/accounts', { id: '2', name: 'existing', code: 'user-code' });
++    assert.equal(update.status, 200);
++    assert.equal(f.call('post', RECOVER, { expected, code: 'fresh' }).status, 409);
++    assert.equal(f.accounts[0].code, 'user-code');
++});
++
++test('snapshot does not arm a stopping worker with stale connected status', () => {
++    const f = setup(); f.setRunning(true); f.setStopping(true);
++    assert.equal(f.call('get', STATE).result.data.online, false);
++});
+diff --git a/core/tests/network-session-stability.test.js b/core/tests/network-session-stability.test.js
+index 223338e..7516be9 100644
+--- a/core/tests/network-session-stability.test.js
++++ b/core/tests/network-session-stability.test.js
+@@ -34,7 +34,7 @@ function harness() {
+         '../services/ace': { startAceRuntime() {}, stopAceRuntime() {}, getAceDiagnostics: () => ({}) },
+         '../services/status': { updateStatusFromLogin() {} },
+         './crypto-wasm': { bindUser() {}, getEncryptedInitInfo: () => '', getDiagnostics: () => ({}) },
+-        './utils': { toLong: Number, toNum: Number, log() {}, logWarn() {}, syncServerTime() {} },
++        './utils': { toLong: Number, toNum: Number, log() {}, logWarn() {}, syncServerTime() {}, getServerTimeSec: () => Math.floor(wall / 1000), formatDateKeyInTimeZone: realRequire('./utils').formatDateKeyInTimeZone },
+     };
+     const sandbox = {
+         require: name => overrides[name] || realRequire(name), module: { exports: {} }, exports: {},
+diff --git a/core/tests/player-scene-login.test.js b/core/tests/player-scene-login.test.js
+index bee4836..c8d866e 100644
+--- a/core/tests/player-scene-login.test.js
++++ b/core/tests/player-scene-login.test.js
+@@ -20,7 +20,7 @@ async function harness(platform) {
+         '../services/ace': { startAceRuntime: () => steps.push('ace') },
+         '../services/status': { updateStatusFromLogin() {} },
+         './crypto-wasm': { bindUser: async () => steps.push('bind'), getEncryptedInitInfo: () => '' },
+-        './utils': { toLong: Number, toNum: Number, log() {}, logWarn() {}, syncServerTime() {} },
++        './utils': { toLong: Number, toNum: Number, log() {}, logWarn() {}, syncServerTime() {}, getServerTimeSec: () => 1000, formatDateKeyInTimeZone: realRequire('./utils').formatDateKeyInTimeZone },
+     };
+     const sandbox = { require: name => overrides[name] || realRequire(name), module: { exports: {} }, exports: {}, Buffer, console: { warn() {} }, process, steps };
+     vm.runInNewContext(`${fs.readFileSync(file, 'utf8')}

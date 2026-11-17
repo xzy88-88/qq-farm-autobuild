@@ -11,7 +11,8 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/build.yml'
-      - 'milk-tea-auto-*.patch'
+      - 'maintenance-ranch-v1.patch'
+      - 'install-ranch-receiver.py'
       - 'ci/**'
   schedule:
     # Poll upstream every 30 minutes so a merged upstream change reaches the
@@ -49,7 +50,7 @@ jobs:
           git clone --depth 1 --branch master https://github.com/liyangpengs/qq-farm-bot.git source
           revision=$(git -C source rev-parse HEAD)
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
-          if gh release view "upstream-$revision-milk-tea-auto-v5" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          if gh release view "upstream-$revision-ranch-maintained-v1" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo 'build=false' >> "$GITHUB_OUTPUT"
           else
             echo 'build=true' >> "$GITHUB_OUTPUT"
@@ -108,17 +109,17 @@ jobs:
           p.write_text(s)
           PY
 
-      - name: Apply and test maintained milk tea automation
+      - name: Apply and test maintained ranch compatibility
         if: steps.upstream.outputs.build == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          git -C source apply --check ../milk-tea-auto-v5-web.patch
-          git -C source apply ../milk-tea-auto-v5-web.patch
+          git -C source apply --check ../maintenance-ranch-v1.patch
+          git -C source apply ../maintenance-ranch-v1.patch
           npm install --global pnpm@10.30.2
           pnpm -C source install --frozen-lockfile
           pnpm -C source/core build:ts
-          ( cd source/core && node --test tests/*.test.js > "$RUNNER_TEMP/core-tests.tap" 2>&1 ) || true
+          ( cd source/core && node --test --test-reporter=tap tests/*.test.js > "$RUNNER_TEMP/core-tests.tap" 2>&1 ) || true
           cat "$RUNNER_TEMP/core-tests.tap"
           python3 ci/core-test-gate.py "$RUNNER_TEMP/core-tests.tap"
           pnpm -C source/web test
@@ -131,17 +132,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # The capability label and the release tag stay milk-tea-auto-v5: the
-          # server receiver validates exactly that value, and the capability
-          # contract (auto hire + reserve + duration + recovery fence) did not
-          # change. Only the patch file carries the restored settings UI.
           docker build -f source/core/Dockerfile \
             --label "org.opencontainers.image.revision=$REVISION" \
             --label 'qq-farm.local-compatibility=qmsg-v3,qq-login-confirmed-without-qr' \
-            --label 'qq-farm.milk-tea-automation=milk-tea-auto-v5' \
+            --label 'qq-farm.maintained-capability=ranch-maintained-v1' \
             --label 'qq-farm.friend-relation-guard=not-friend-v1' \
             --label 'qq-farm.network-recovery=network-recovery-v1' \
-            -t "qq-farm-bot:auto-${REVISION:0:12}-milk-tea-auto-v5" source
+            -t "qq-farm-bot:auto-${REVISION:0:12}-ranch-maintained-v1" source
 
       - name: Verify startup without real accounts or network
         if: steps.upstream.outputs.build == 'true'
@@ -150,9 +147,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          image="qq-farm-bot:auto-${REVISION:0:12}-milk-tea-auto-v5"
+          image="qq-farm-bot:auto-${REVISION:0:12}-ranch-maintained-v1"
           docker run --rm --network=none --entrypoint node "$image" -e \
-            'require("./dist/services/qq-login/service"); require("./dist/services/push"); const m=require("./dist/services/milk-tea"); if(typeof m.runMilkTeaAutomation!=="function" || m.getMilkTeaAutomationState().autoCraft || m.getMilkTeaAutomationState().autoHire !== false || m.getMilkTeaAutomationState().hireReserve !== 100) throw Error("milk tea capability missing or not opt-in")'
+            'require("./dist/services/qq-login/service"); require("./dist/services/push"); const r=require("./dist/services/ranch"); const f=require("./dist/services/network-recovery-fence"); const a=require("./dist/config/ranch-automation").RANCH_AUTOMATION_DEFAULTS; if(typeof r.getRanchState!=="function" || typeof r.operateRanch!=="function" || typeof f.createRecoveryFence!=="function" || a.ranch_buy || a.ranch_grass_buy || a.ranch_upgrade) throw Error("maintained ranch capability missing or unsafe defaults")'
           docker run -d --name farm-check --network=none --tmpfs /app/core/data:rw,size=16m "$image"
           trap 'docker rm -f farm-check >/dev/null 2>&1 || true' EXIT
           for i in $(seq 1 60); do
@@ -172,7 +169,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          image="qq-farm-bot:auto-${REVISION:0:12}-milk-tea-auto-v5"
+          image="qq-farm-bot:auto-${REVISION:0:12}-ranch-maintained-v1"
           docker save "$image" | gzip -1 > qq-farm-image.tar.gz
           export IMAGE_TAG="$image"
           python3 - <<'PY'
@@ -180,10 +177,10 @@ jobs:
           p=pathlib.Path('qq-farm-image.tar.gz')
           metadata={'revision':os.environ['REVISION'],'image_tag':os.environ['IMAGE_TAG'],
                     'sha256':hashlib.file_digest(p.open('rb'),'sha256').hexdigest(),'size':p.stat().st_size,
-                    'build_capability':'milk-tea-auto-v5','compatibility':['qmsg-v3','qq-login-confirmed-without-qr','milk-tea-auto-v5']}
+                    'build_capability':'ranch-maintained-v1','compatibility':['qmsg-v3','qq-login-confirmed-without-qr','ranch-maintained-v1','not-friend-v1','network-recovery-v1']}
           pathlib.Path('manifest.json').write_text(json.dumps(metadata,indent=2))
           PY
-          gh release create "upstream-$REVISION-milk-tea-auto-v5" qq-farm-image.tar.gz manifest.json \
+          gh release create "upstream-$REVISION-ranch-maintained-v1" qq-farm-image.tar.gz manifest.json \
             --repo "$GITHUB_REPOSITORY" --latest \
             --title "QQ Farm ${REVISION:0:12}" \
-            --notes "Automatic build of liyangpengs/qq-farm-bot master commit $REVISION with the maintained milk-tea-auto-v5 capability: opt-in milk tea upgrade/craft/hire with coupon reserve, friend-relation (1001048) retry protection, bounded network recovery fencing, restored settings UI, and the QQ login / Qmsg compatibility applied by the server receiver. No server credentials or account data are included."
+            --notes "Automatic build of liyangpengs/qq-farm-bot master commit $REVISION with the maintained ranch-maintained-v1 capability: upstream ranch UI/protocol/automation, friend-relation (1001048) retry protection, bounded network recovery fencing, and QQ login / Qmsg compatibility applied by the server receiver. Retired milk tea automation is not required. No server credentials or account data are included."
