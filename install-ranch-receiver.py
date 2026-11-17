@@ -10,9 +10,14 @@ import time
 
 CAPABILITY = 'ranch-maintained-v2'
 MARKER = '# maintained ranch-maintained-v2 receiver'
+OLD_CAPABILITY = 'ranch-maintained-v1'
+OLD_MARKER = '# maintained ranch-maintained-v1 receiver'
 LABELS = {'qq-farm.maintained-capability': CAPABILITY,
           'qq-farm.friend-relation-guard': 'not-friend-v1',
           'qq-farm.network-recovery': 'network-recovery-v1'}
+OLD_LABELS = {'qq-farm.maintained-capability': OLD_CAPABILITY,
+              'qq-farm.friend-relation-guard': 'not-friend-v1',
+              'qq-farm.network-recovery': 'network-recovery-v1'}
 SMOKE = '''const r=require("./dist/services/ranch"); const f=require("./dist/services/network-recovery-fence"); const a=require("./dist/config/ranch-automation").RANCH_AUTOMATION_DEFAULTS; if(typeof r.getRanchState!=="function" || typeof r.operateRanch!=="function" || typeof f.createRecoveryFence!=="function" || a.ranch_buy || a.ranch_grass_buy || a.ranch_upgrade) throw Error("invalid maintained ranch capability")'''
 CHECK = '''def check_maintained_ranch(tag):
     labels = json.loads(run(['docker', 'image', 'inspect', tag]))[0]['Config'].get('Labels', {})
@@ -24,6 +29,16 @@ CHECK = '''def check_maintained_ranch(tag):
 
 
 ''' % (LABELS, SMOKE)
+OLD_CHECK = '''def check_maintained_ranch(tag):
+    labels = json.loads(run(['docker', 'image', 'inspect', tag]))[0]['Config'].get('Labels', {})
+    required = %r
+    if any(labels.get(key) != value for key, value in required.items()):
+        raise RuntimeError('Maintained ranch capability missing; existing deployment preserved')
+    script = %r
+    run(['docker', 'run', '--rm', '--network=none', '--memory=256m', '--tmpfs', '/app/core/data:rw,size=16m', '--entrypoint', 'node', tag, '-e', script])
+
+
+''' % (OLD_LABELS, SMOKE)
 PROTECTED = ('deployment_lock', 'snapshot_data', 'restore_data', 'recovery_locked', 'recovery', 'deploy_locked', 'deploy')
 
 def legacy_receiver():
@@ -49,6 +64,26 @@ def transform(source):
     if MARKER in source:
         validate(source)
         return source
+    if OLD_MARKER in source:
+        ast.parse(source)
+        if (source.count(OLD_MARKER) != 1 or source.count(OLD_CHECK) != 1
+                or 'from login_compat import prepare' not in source
+                or 'tag = prepare(tag, revision)' not in source
+                or "live_labels.get('qq-farm.maintained-capability') == 'ranch-maintained-v1' and not args.build_check:" not in source
+                or source.count(OLD_CAPABILITY) < 1):
+            raise RuntimeError('Existing v1 ranch receiver changed; review required')
+        before = ast.parse(source)
+        result = source.replace(OLD_CAPABILITY, CAPABILITY)
+        result = result.replace(OLD_MARKER, MARKER, 1)
+        result = result.replace(OLD_CHECK, CHECK, 1)
+        after = ast.parse(result)
+        for name in PROTECTED:
+            old = next(n for n in before.body if isinstance(n, ast.FunctionDef) and n.name == name)
+            new = next(n for n in after.body if isinstance(n, ast.FunctionDef) and n.name == name)
+            if ast.dump(old) != ast.dump(new):
+                raise RuntimeError('Protected transaction function changed: ' + name)
+        validate(result)
+        return result
     legacy = legacy_receiver()
     verified = legacy.transform(source)
     before = ast.parse(verified)

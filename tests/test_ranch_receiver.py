@@ -1,6 +1,7 @@
 import ast
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -69,6 +70,42 @@ class RanchReceiverTests(unittest.TestCase):
         args = type('Args', (), {'build_check': False})()
         for labels, expected in [({'qq-farm.milk-tea-automation': 'milk-tea-auto-v5'}, False), ({'qq-farm.maintained-capability': 'ranch-maintained-v1'}, False), ({'qq-farm.maintained-capability': 'ranch-maintained-v2'}, True)]:
             self.assertEqual(eval(expression, {'revision': 'a'*40, 'deployed': 'a'*40, 'live_labels': labels, 'args': args}), expected)
+
+    def test_existing_v1_receiver_migrates_to_v2_and_preserves_transaction_functions(self):
+        v1_source = subprocess.check_output(
+            ['git', '-C', str(ROOT), 'show', 'd3d47a4:install-ranch-receiver.py'], text=True)
+        legacy_path = ROOT / 'tests/fixtures/install-milk-tea-receiver.py'
+        legacy_path.write_text((ROOT / 'install-milk-tea-receiver.py').read_text(encoding='utf-8'), encoding='utf-8')
+        self.addCleanup(legacy_path.unlink, missing_ok=True)
+        v1_path = ROOT / 'tests/fixtures/install-ranch-receiver-v1.py'
+        v1_path.write_text(v1_source, encoding='utf-8')
+        self.addCleanup(v1_path.unlink, missing_ok=True)
+        v1 = load('ranch_receiver_v1_test', v1_path)
+        v1_receiver = v1.transform(V5)
+        result = ranch.transform(v1_receiver)
+        self.assertEqual(ranch.transform(result), result)
+        self.assertNotIn('ranch-maintained-v1', result)
+        self.assertEqual(result.count('ranch-maintained-v2'), 15)
+        self.assertIn("live_labels.get('qq-farm.maintained-capability') == 'ranch-maintained-v2' and not args.build_check:", result)
+        for name in PROTECTED:
+            self.assertEqual(ast.dump(function_tree(v1_receiver, name)),
+                             ast.dump(function_tree(result, name)), name)
+
+    def test_changed_v1_receiver_is_rejected_before_migration(self):
+        v1_source = subprocess.check_output(
+            ['git', '-C', str(ROOT), 'show', 'd3d47a4:install-ranch-receiver.py'], text=True)
+        legacy_path = ROOT / 'tests/fixtures/install-milk-tea-receiver.py'
+        legacy_path.write_text((ROOT / 'install-milk-tea-receiver.py').read_text(encoding='utf-8'), encoding='utf-8')
+        self.addCleanup(legacy_path.unlink, missing_ok=True)
+        v1_path = ROOT / 'tests/fixtures/install-ranch-receiver-v1-negative.py'
+        v1_path.write_text(v1_source, encoding='utf-8')
+        self.addCleanup(v1_path.unlink, missing_ok=True)
+        v1 = load('ranch_receiver_v1_negative_test', v1_path)
+        changed = v1.transform(V5).replace(
+            "live_labels.get('qq-farm.maintained-capability') == 'ranch-maintained-v1'",
+            "live_labels.get('qq-farm.maintained-capability') in ('ranch-maintained-v1', 'ranch-maintained-v0')", 1)
+        with self.assertRaises(RuntimeError):
+            ranch.transform(changed)
 
 if __name__ == '__main__':
     unittest.main()
