@@ -1,7 +1,6 @@
 import ast
 import importlib.util
 import json
-import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -72,8 +71,7 @@ class RanchReceiverTests(unittest.TestCase):
             self.assertEqual(eval(expression, {'revision': 'a'*40, 'deployed': 'a'*40, 'live_labels': labels, 'args': args}), expected)
 
     def test_existing_v1_receiver_migrates_to_v2_and_preserves_transaction_functions(self):
-        v1_source = subprocess.check_output(
-            ['git', '-C', str(ROOT), 'show', 'd3d47a4:install-ranch-receiver.py'], text=True)
+        v1_source = (ROOT / 'tests/fixtures/install-ranch-receiver-v1.py.txt').read_text(encoding='utf-8')
         legacy_path = ROOT / 'tests/fixtures/install-milk-tea-receiver.py'
         legacy_path.write_text((ROOT / 'install-milk-tea-receiver.py').read_text(encoding='utf-8'), encoding='utf-8')
         self.addCleanup(legacy_path.unlink, missing_ok=True)
@@ -92,8 +90,7 @@ class RanchReceiverTests(unittest.TestCase):
                              ast.dump(function_tree(result, name)), name)
 
     def test_changed_v1_receiver_is_rejected_before_migration(self):
-        v1_source = subprocess.check_output(
-            ['git', '-C', str(ROOT), 'show', 'd3d47a4:install-ranch-receiver.py'], text=True)
+        v1_source = (ROOT / 'tests/fixtures/install-ranch-receiver-v1.py.txt').read_text(encoding='utf-8')
         legacy_path = ROOT / 'tests/fixtures/install-milk-tea-receiver.py'
         legacy_path.write_text((ROOT / 'install-milk-tea-receiver.py').read_text(encoding='utf-8'), encoding='utf-8')
         self.addCleanup(legacy_path.unlink, missing_ok=True)
