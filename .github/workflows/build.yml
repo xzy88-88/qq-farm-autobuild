@@ -13,6 +13,8 @@ on:
       - '.github/workflows/build.yml'
       - 'maintenance-ranch-v1.patch'
       - 'install-ranch-receiver.py'
+      - 'web-ui-ranch-entry-v2.py'
+      - 'web-ranch-entry.test.mjs'
       - 'ci/**'
   schedule:
     # Poll upstream every 30 minutes so a merged upstream change reaches the
@@ -50,7 +52,7 @@ jobs:
           git clone --depth 1 --branch master https://github.com/liyangpengs/qq-farm-bot.git source
           revision=$(git -C source rev-parse HEAD)
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
-          if gh release view "upstream-$revision-ranch-maintained-v1" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          if gh release view "upstream-$revision-ranch-maintained-v2" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo 'build=false' >> "$GITHUB_OUTPUT"
           else
             echo 'build=true' >> "$GITHUB_OUTPUT"
@@ -118,12 +120,15 @@ jobs:
           git -C source apply ../maintenance-ranch-v1.patch
           npm install --global pnpm@10.30.2
           pnpm -C source install --frozen-lockfile
+          python3 web-ui-ranch-entry-v2.py
+          cp web-ranch-entry.test.mjs source/web/tests/web-ranch-entry.test.mjs
+          pnpm -C source/web install --frozen-lockfile
+          pnpm -C source/web test
+          pnpm -C source/web typecheck
           pnpm -C source/core build:ts
           ( cd source/core && node --test --test-reporter=tap tests/*.test.js > "$RUNNER_TEMP/core-tests.tap" 2>&1 ) || true
           cat "$RUNNER_TEMP/core-tests.tap"
           python3 ci/core-test-gate.py "$RUNNER_TEMP/core-tests.tap"
-          pnpm -C source/web test
-          pnpm -C source/web typecheck
 
       - name: Build Linux image on GitHub
         if: steps.upstream.outputs.build == 'true'
@@ -135,10 +140,10 @@ jobs:
           docker build -f source/core/Dockerfile \
             --label "org.opencontainers.image.revision=$REVISION" \
             --label 'qq-farm.local-compatibility=qmsg-v3,qq-login-confirmed-without-qr' \
-            --label 'qq-farm.maintained-capability=ranch-maintained-v1' \
+            --label 'qq-farm.maintained-capability=ranch-maintained-v2' \
             --label 'qq-farm.friend-relation-guard=not-friend-v1' \
             --label 'qq-farm.network-recovery=network-recovery-v1' \
-            -t "qq-farm-bot:auto-${REVISION:0:12}-ranch-maintained-v1" source
+            -t "qq-farm-bot:auto-${REVISION:0:12}-ranch-maintained-v2" source
 
       - name: Verify startup without real accounts or network
         if: steps.upstream.outputs.build == 'true'
@@ -147,7 +152,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          image="qq-farm-bot:auto-${REVISION:0:12}-ranch-maintained-v1"
+          image="qq-farm-bot:auto-${REVISION:0:12}-ranch-maintained-v2"
           docker run --rm --network=none --entrypoint node "$image" -e \
             'require("./dist/services/qq-login/service"); require("./dist/services/push"); const r=require("./dist/services/ranch"); const f=require("./dist/services/network-recovery-fence"); const a=require("./dist/config/ranch-automation").RANCH_AUTOMATION_DEFAULTS; if(typeof r.getRanchState!=="function" || typeof r.operateRanch!=="function" || typeof f.createRecoveryFence!=="function" || a.ranch_buy || a.ranch_grass_buy || a.ranch_upgrade) throw Error("maintained ranch capability missing or unsafe defaults")'
           docker run -d --name farm-check --network=none --tmpfs /app/core/data:rw,size=16m "$image"
@@ -169,7 +174,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          image="qq-farm-bot:auto-${REVISION:0:12}-ranch-maintained-v1"
+          image="qq-farm-bot:auto-${REVISION:0:12}-ranch-maintained-v2"
           docker save "$image" | gzip -1 > qq-farm-image.tar.gz
           export IMAGE_TAG="$image"
           python3 - <<'PY'
@@ -177,10 +182,10 @@ jobs:
           p=pathlib.Path('qq-farm-image.tar.gz')
           metadata={'revision':os.environ['REVISION'],'image_tag':os.environ['IMAGE_TAG'],
                     'sha256':hashlib.file_digest(p.open('rb'),'sha256').hexdigest(),'size':p.stat().st_size,
-                    'build_capability':'ranch-maintained-v1','compatibility':['qmsg-v3','qq-login-confirmed-without-qr','ranch-maintained-v1','not-friend-v1','network-recovery-v1']}
+                    'build_capability':'ranch-maintained-v2','compatibility':['qmsg-v3','qq-login-confirmed-without-qr','ranch-maintained-v2','not-friend-v1','network-recovery-v1']}
           pathlib.Path('manifest.json').write_text(json.dumps(metadata,indent=2))
           PY
-          gh release create "upstream-$REVISION-ranch-maintained-v1" qq-farm-image.tar.gz manifest.json \
+          gh release create "upstream-$REVISION-ranch-maintained-v2" qq-farm-image.tar.gz manifest.json \
             --repo "$GITHUB_REPOSITORY" --latest \
             --title "QQ Farm ${REVISION:0:12}" \
-            --notes "Automatic build of liyangpengs/qq-farm-bot master commit $REVISION with the maintained ranch-maintained-v1 capability: upstream ranch UI/protocol/automation, friend-relation (1001048) retry protection, bounded network recovery fencing, and QQ login / Qmsg compatibility applied by the server receiver. Retired milk tea automation is not required. No server credentials or account data are included."
+            --notes "Automatic build of liyangpengs/qq-farm-bot master commit $REVISION with the maintained ranch-maintained-v2 capability: upstream ranch UI/protocol/automation, a ranch activity entry from the farm activity center, friend-relation (1001048) retry protection, bounded network recovery fencing, and QQ login / Qmsg compatibility applied by the server receiver. Retired milk tea automation is not required. No server credentials or account data are included."

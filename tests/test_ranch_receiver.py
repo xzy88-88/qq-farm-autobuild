@@ -51,7 +51,7 @@ class RanchReceiverTests(unittest.TestCase):
     def test_incorrect_candidate_capability_cannot_reach_smoke_execution(self):
         source = ranch.transform(V5)
         node = function_tree(source, 'check_maintained_ranch')
-        required = {'qq-farm.maintained-capability': 'ranch-maintained-v1', 'qq-farm.friend-relation-guard': 'not-friend-v1', 'qq-farm.network-recovery': 'network-recovery-v1'}
+        required = {'qq-farm.maintained-capability': 'ranch-maintained-v2', 'qq-farm.friend-relation-guard': 'not-friend-v1', 'qq-farm.network-recovery': 'network-recovery-v1'}
         for missing in required:
             labels = {k: v for k, v in required.items() if k != missing}
             run = Mock(return_value=json.dumps([{'Config': {'Labels': labels}}]))
@@ -67,7 +67,7 @@ class RanchReceiverTests(unittest.TestCase):
         condition = next(n.test for n in ast.walk(main) if isinstance(n, ast.If) and ast.unparse(n.test).startswith('revision == deployed'))
         expression = compile(ast.Expression(condition), '<skip>', 'eval')
         args = type('Args', (), {'build_check': False})()
-        for labels, expected in [({'qq-farm.milk-tea-automation': 'milk-tea-auto-v5'}, False), ({'qq-farm.maintained-capability': 'ranch-maintained-v1'}, True)]:
+        for labels, expected in [({'qq-farm.milk-tea-automation': 'milk-tea-auto-v5'}, False), ({'qq-farm.maintained-capability': 'ranch-maintained-v1'}, False), ({'qq-farm.maintained-capability': 'ranch-maintained-v2'}, True)]:
             self.assertEqual(eval(expression, {'revision': 'a'*40, 'deployed': 'a'*40, 'live_labels': labels, 'args': args}), expected)
 
 if __name__ == '__main__':

@@ -8,8 +8,8 @@ import pathlib
 import shutil
 import time
 
-CAPABILITY = 'ranch-maintained-v1'
-MARKER = '# maintained ranch-maintained-v1 receiver'
+CAPABILITY = 'ranch-maintained-v2'
+MARKER = '# maintained ranch-maintained-v2 receiver'
 LABELS = {'qq-farm.maintained-capability': CAPABILITY,
           'qq-farm.friend-relation-guard': 'not-friend-v1',
           'qq-farm.network-recovery': 'network-recovery-v1'}
@@ -42,7 +42,7 @@ def validate(source):
             or 'from login_compat import prepare' not in source
             or 'tag = prepare(tag, revision)' not in source
             or 'milk-tea-auto-v5' in source
-            or "live_labels.get('qq-farm.maintained-capability') == 'ranch-maintained-v1'" not in source):
+            or "live_labels.get('qq-farm.maintained-capability') == 'ranch-maintained-v2'" not in source):
         raise RuntimeError('Maintained ranch receiver changed; review required')
 
 def transform(source):
