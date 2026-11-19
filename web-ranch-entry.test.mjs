@@ -25,6 +25,8 @@ function loadIndex() {
 }
 
 const { resolveActivityGameplay, activityHasGameplay } = loadIndex()
+const { buildActivityGameplayBindings, resolveActivityGameplays } = require('../../core/dist/services/activity-gameplay-registry')
+const bindings = buildActivityGameplayBindings({})
 
 function activity(id, name, overrides = {}) {
   return {
@@ -40,17 +42,16 @@ function activity(id, name, overrides = {}) {
   }
 }
 
-test('牧歌初启 opens ranch activity from the farm activity center', () => {
+test('牧歌初启 bindings from the backend open the native activity page', () => {
   for (const id of ['2026111700', '2026111702', '2026111703', '2026111704', '2026111705']) {
-    const resolved = resolveActivityGameplay(activity(id, '牧歌初启'))
-    assert.equal(resolved?.module.key, 'ranch', id)
-    assert.equal(resolved?.entryTab, 'ranch', id)
-    assert.equal(activityHasGameplay(activity(id, '牧歌初启')), true, id)
+    const entry = activity(id, '牧歌初启', resolveActivityGameplays([id], bindings))
+    const resolved = resolveActivityGameplay(entry)
+    assert.equal(resolved?.module.key, 'muge', id)
+    assert.equal(resolved?.entryTab, 'muge', id)
+    assert.equal(activityHasGameplay(entry), true, id)
   }
-  const byName = resolveActivityGameplay(activity('future-id', '牧歌初启'))
-  assert.equal(byName?.module.key, 'ranch')
-  const byDetailTarget = resolveActivityGameplay(activity('future-id', 'other', { detailTarget: 'ranch' }))
-  assert.equal(byDetailTarget?.module.key, 'ranch')
+  const source = readFileSync(new URL('../src/views/ActivityCenter.vue', import.meta.url), 'utf8')
+  assert.match(source, /<MugePage v-else-if="selectedActivity === 'muge'"/)
 })
 
 test('unrelated November 17 activities are not classified as ranch gameplay', () => {
@@ -65,12 +66,4 @@ test('existing gameplay inference is unchanged', () => {
   assert.equal(resolveActivityGameplay(activity('2026090100', '萌宠成长日记'))?.module.key, 'pet')
   assert.equal(resolveActivityGameplay(activity('2026072700', '心许千灯星垂野'))?.module.key, 'stellar')
   assert.equal(resolveActivityGameplay(activity('2026070300', '雨落成诗'))?.module.key, 'weather')
-})
-
-test('ranch activity detail opens the ranch page without an activity detail request', () => {
-  const source = readFileSync(new URL('../src/views/ActivityCenter.vue', import.meta.url), 'utf8')
-  const openActivity = source.slice(source.indexOf('async function openActivity'), source.indexOf('function goBack'))
-  assert.match(openActivity, /gameplay\.module\.key === 'ranch'/)
-  assert.match(openActivity, /router\.push\('\/ranch\/activity'\)/)
-  assert.ok(openActivity.indexOf("module.key === 'ranch'") < openActivity.indexOf('loadDetails'), 'ranch must return before loadDetails')
 })

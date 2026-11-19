@@ -13,14 +13,11 @@ on:
       - '.github/workflows/build.yml'
       - 'maintenance-ranch-v1.patch'
       - 'install-ranch-receiver.py'
-      - 'web-ui-ranch-entry-v2.py'
       - 'web-ranch-entry.test.mjs'
       - 'ci/**'
   schedule:
-    # Poll upstream every 30 minutes so a merged upstream change reaches the
-    # server without manual work. Cheap when nothing changed: the release check
-    # exits before any build step runs.
-    - cron: '*/30 * * * *'
+    # Poll upstream off the hour. Existing complete releases skip rebuilding.
+    - cron: '7,22,37,52 * * * *'
 
 permissions:
   contents: write
@@ -33,11 +30,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    env:
-      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Fetch maintained feature patch
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Test updater capability migration
         run: |
@@ -46,12 +43,15 @@ jobs:
 
       - name: Fetch upstream and check published build
         id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           git clone --depth 1 --branch master https://github.com/liyangpengs/qq-farm-bot.git source
           revision=$(git -C source rev-parse HEAD)
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
+          echo "Building from upstream $revision"
           if gh release view "upstream-$revision-ranch-maintained-v2" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo 'build=false' >> "$GITHUB_OUTPUT"
           else
@@ -116,16 +116,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git -C source apply --check ../maintenance-ranch-v1.patch
-          git -C source apply ../maintenance-ranch-v1.patch
+          # Fetch the preimages required for three-way application of the maintained patch.
+          git -C source fetch --depth=1 origin 61d4854c97f81a46b6e1d71011853e7643c4750c
+          git -C source apply --3way ../maintenance-ranch-v1.patch
+          python3 ci/ranch-defaults.py source
           npm install --global pnpm@10.30.2
           pnpm -C source install --frozen-lockfile
-          python3 web-ui-ranch-entry-v2.py
+          pnpm -C source/core build:ts
+          node ci/ranch-defaults-smoke.cjs source
           cp web-ranch-entry.test.mjs source/web/tests/web-ranch-entry.test.mjs
-          pnpm -C source/web install --frozen-lockfile
           pnpm -C source/web test
           pnpm -C source/web typecheck
-          pnpm -C source/core build:ts
           ( cd source/core && node --test --test-reporter=tap tests/*.test.js > "$RUNNER_TEMP/core-tests.tap" 2>&1 ) || true
           cat "$RUNNER_TEMP/core-tests.tap"
           python3 ci/core-test-gate.py "$RUNNER_TEMP/core-tests.tap"
@@ -170,6 +171,7 @@ jobs:
       - name: Publish image archive and checksum
         if: steps.upstream.outputs.build == 'true' && inputs.dry_run != true
         env:
+          GH_TOKEN: ${{ github.token }}
           REVISION: ${{ steps.upstream.outputs.revision }}
         shell: bash
         run: |
@@ -188,4 +190,4 @@ jobs:
           gh release create "upstream-$REVISION-ranch-maintained-v2" qq-farm-image.tar.gz manifest.json \
             --repo "$GITHUB_REPOSITORY" --latest \
             --title "QQ Farm ${REVISION:0:12}" \
-            --notes "Automatic build of liyangpengs/qq-farm-bot master commit $REVISION with the maintained ranch-maintained-v2 capability: upstream ranch UI/protocol/automation, a ranch activity entry from the farm activity center, friend-relation (1001048) retry protection, bounded network recovery fencing, and QQ login / Qmsg compatibility applied by the server receiver. Retired milk tea automation is not required. No server credentials or account data are included."
+            --notes "Automatic build of liyangpengs/qq-farm-bot master commit $REVISION with the maintained ranch-maintained-v2 capability: upstream ranch UI/protocol/automation, the upstream activity center integration, friend-relation (1001048) retry protection, bounded network recovery fencing, and QQ login / Qmsg compatibility applied by the server receiver. Retired milk tea automation is not required. No server credentials or account data are included."

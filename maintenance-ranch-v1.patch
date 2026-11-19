@@ -1,5 +1,5 @@
 diff --git a/core/src/controllers/admin/account-routes.ts b/core/src/controllers/admin/account-routes.ts
-index 07b9a5f..901ae62 100644
+index 07b9a5fa620245c678a47c85e447be9ed84bd9fe..901ae62b700c78003b6a5c7c4ed83570653941da 100644
 --- a/core/src/controllers/admin/account-routes.ts
 +++ b/core/src/controllers/admin/account-routes.ts
 @@ -7,6 +7,7 @@ export {};
@@ -35,7 +35,7 @@ index 07b9a5f..901ae62 100644
              const data = deleteAccount(resolvedId);
              if (ctx.provider.addAccountLog) {
 diff --git a/core/src/controllers/admin/farm-routes.ts b/core/src/controllers/admin/farm-routes.ts
-index 4b812fb..0c52a1a 100644
+index 4b812fba586f89633f614cce572b065c8f7fedfb..0c52a1a4af819d13874faa21279a71c6fb7c3648 100644
 --- a/core/src/controllers/admin/farm-routes.ts
 +++ b/core/src/controllers/admin/farm-routes.ts
 @@ -9,6 +9,7 @@ export {};
@@ -98,10 +98,10 @@ index 4b812fb..0c52a1a 100644
      app.post('/api/farm/fertilize', async (req: Request, res: Response) => {
          const id = getAccId(ctx, req);
 diff --git a/core/src/runtime/data-provider.ts b/core/src/runtime/data-provider.ts
-index 2a002cd..6da0651 100644
+index 3bdaede04945a25aed9bbd0eb958bcb753b1d74f..ec4e229530cd2326dc57c6f01144ef8b2a6dd6c4 100644
 --- a/core/src/runtime/data-provider.ts
 +++ b/core/src/runtime/data-provider.ts
-@@ -445,6 +445,12 @@ function createDataProvider(options: DataProviderOptions) {
+@@ -449,6 +449,12 @@ function createDataProvider(options: DataProviderOptions) {
              return true;
          },
  
@@ -115,10 +115,10 @@ index 2a002cd..6da0651 100644
              const accountId = resolveAccountRefId(accountRef);
              return !!(accountId && workers[accountId]);
 diff --git a/core/src/services/friend/visit-strategy.ts b/core/src/services/friend/visit-strategy.ts
-index 282caa2..88ebaaf 100644
+index a411fc99d585b96f571add1850430b4c0fc3e495..a39ae3280682633066e64563dc649f3e6b9148c6 100644
 --- a/core/src/services/friend/visit-strategy.ts
 +++ b/core/src/services/friend/visit-strategy.ts
-@@ -54,6 +54,33 @@ function schedulerRef(): any {
+@@ -55,6 +55,33 @@ function schedulerRef(): any {
  // ============ 内部状态 ============
  let friendsListCache: any[] | null = null;
  let friendsListCacheTime: number = 0;
@@ -152,7 +152,7 @@ index 282caa2..88ebaaf 100644
  
  function isProtectDog(dogInfo: any): boolean {
      return toNum(dogInfo && (dogInfo.dog_id ?? dogInfo.dogId)) === PROTECT_DOG_ID;
-@@ -72,6 +99,7 @@ interface FarmingOutcome {
+@@ -73,6 +100,7 @@ interface FarmingOutcome {
      operationLimits: any[];
      dogSkillGiftCount: number;
      code?: number;
@@ -160,7 +160,7 @@ index 282caa2..88ebaaf 100644
  }
  
  interface RecentHelpEntry {
-@@ -227,6 +255,10 @@ export function handleFriendEnterError(friendGid: any, friendName: string, error
+@@ -228,6 +256,10 @@ export function handleFriendEnterError(friendGid: any, friendName: string, error
      const gid: number = toNum(friendGid);
      const displayName: string = String(friendName || '').trim() || `GID:${gid}`;
      const reason: string = String((error && error.message) || error || '');
@@ -171,7 +171,7 @@ index 282caa2..88ebaaf 100644
      if (isEnterFarmBannedError(error)) {
          addFriendToBlacklist(gid, displayName, reason);
          return { handled: true, kind: 'blacklist' };
-@@ -394,7 +426,8 @@ export function buildFriendPetView(friendGid: any): { petState: FriendPetState;
+@@ -395,7 +427,8 @@ export function buildFriendPetView(friendGid: any): { petState: FriendPetState;
  
  // 宠物结论随时会被 Enter 回包刷新，所以不写进好友列表缓存，只在返回前附加
  function withFriendPetView(list: any[]): any[] {
@@ -181,7 +181,7 @@ index 282caa2..88ebaaf 100644
  }
  
  /**
-@@ -581,6 +614,12 @@ async function runFarmingWithFallback(
+@@ -582,6 +615,12 @@ async function runFarmingWithFallback(
          releaseRecentHelp(hostGid, unconfirmed);
          return batch;
      } catch (error) {
@@ -194,7 +194,7 @@ index 282caa2..88ebaaf 100644
          if (propagateErrors) throw error;
          releaseRecentHelp(hostGid, target);
          const outcomes: FarmingOutcome[] = [];
-@@ -593,6 +632,12 @@ async function runFarmingWithFallback(
+@@ -594,6 +633,12 @@ async function runFarmingWithFallback(
                  else if (outcome.effect === 'confirmed') markRecentHelp(hostGid, outcome.landIds, 'confirmed', HELP_RESULT_TTL_MS, snapshotKey);
                  else releaseRecentHelp(hostGid, [landId]);
              } catch (error) {
@@ -207,7 +207,7 @@ index 282caa2..88ebaaf 100644
                  if (propagateErrors) throw error;
                  releaseRecentHelp(hostGid, [landId]);
              }
-@@ -609,6 +654,7 @@ async function runFarmingWithFallback(
+@@ -610,6 +655,7 @@ async function runFarmingWithFallback(
  export async function doFriendOperation(friendGid: any, opType: string, propagateErrors: boolean = false): Promise<any> {
      const gid: number = toNum(friendGid);
      if (!gid) return { ok: false, message: '无效好友ID', opType };
@@ -215,7 +215,7 @@ index 282caa2..88ebaaf 100644
      if (opType === 'bad' && schedulerRef().isBadOperationLimitReached()) {
          return {
              ok: true,
-@@ -631,6 +677,7 @@ export async function doFriendOperation(friendGid: any, opType: string, propagat
+@@ -632,6 +678,7 @@ export async function doFriendOperation(friendGid: any, opType: string, propagat
          if (handled.handled && handled.kind === 'invalid_removed') {
              return { ok: true, opType, count: 0, message: '好友 GID 已失效，已自动移出已知列表' };
          }
@@ -223,7 +223,7 @@ index 282caa2..88ebaaf 100644
          if (propagateErrors) throw e;
          return { ok: false, message: `进入好友农场失败: ${e.message}`, opType };
      }
-@@ -673,6 +720,8 @@ export async function doFriendOperation(friendGid: any, opType: string, propagat
+@@ -674,6 +721,8 @@ export async function doFriendOperation(friendGid: any, opType: string, propagat
              const outcome: FarmingOutcome = await runFarmingWithFallback(gid, landIds, false, getHelpSnapshotKey(lands), propagateErrors);
              count = outcome.landCount;
              if (outcome.operationCount > 0) recordOperation('helpFarming', outcome.operationCount);
@@ -232,7 +232,7 @@ index 282caa2..88ebaaf 100644
              return {
                  ok: true,
                  opType,
-@@ -744,7 +793,7 @@ export async function doFriendOperation(friendGid: any, opType: string, propagat
+@@ -745,7 +794,7 @@ export async function doFriendOperation(friendGid: any, opType: string, propagat
  interface VisitResult {
      acted: boolean;
      entered: boolean;
@@ -241,7 +241,7 @@ index 282caa2..88ebaaf 100644
      protectDogBypass?: boolean;
  }
  
-@@ -768,6 +817,7 @@ export async function visitFriend(
+@@ -769,6 +818,7 @@ export async function visitFriend(
      options: VisitFriendOptions = {},
  ): Promise<VisitResult> {
      const { gid, name } = friend;
@@ -249,7 +249,7 @@ index 282caa2..88ebaaf 100644
      const allowSteal: boolean = options.allowSteal !== false;
      const allowBad: boolean = options.allowBad !== false;
      const ignoreExpLimit: boolean = !!options.ignoreExpLimit;
-@@ -807,6 +857,7 @@ export async function visitFriend(
+@@ -810,6 +860,7 @@ export async function visitFriend(
          if (handled.handled && handled.kind === 'invalid_removed') {
              return { acted: false, entered: false };
          }
@@ -257,7 +257,7 @@ index 282caa2..88ebaaf 100644
          logWarn('好友', `进入 ${name} 农场失败: ${e.message}`, {
              module: 'friend', event: '进入农场', result: 'error', friendName: name, friendGid: gid
          });
-@@ -848,6 +899,13 @@ export async function visitFriend(
+@@ -851,6 +902,13 @@ export async function visitFriend(
                  totalActions.farming += outcome.landCount;
                  recordOperation('helpFarming', outcome.operationCount);
              }
@@ -273,7 +273,7 @@ index 282caa2..88ebaaf 100644
  
 diff --git a/core/src/services/network-recovery-fence.ts b/core/src/services/network-recovery-fence.ts
 new file mode 100644
-index 0000000..9be34cd
+index 0000000000000000000000000000000000000000..9be34cd62e83c1dfa4ee47bc38f4181710e09fda
 --- /dev/null
 +++ b/core/src/services/network-recovery-fence.ts
 @@ -0,0 +1,41 @@
@@ -319,7 +319,7 @@ index 0000000..9be34cd
 +
 +module.exports = { createRecoveryFence, recoveryFence: createRecoveryFence() };
 diff --git a/core/tests/charity-red-flower-proto.test.js b/core/tests/charity-red-flower-proto.test.js
-index e143b30..485d3a9 100644
+index e143b3089ac6dadd2a070c7b84f97fbaecd1fd52..485d3a948079925ac4d3fde710885fd784bf8183 100644
 --- a/core/tests/charity-red-flower-proto.test.js
 +++ b/core/tests/charity-red-flower-proto.test.js
 @@ -24,7 +24,7 @@ test('charity red flower requests reproduce the capture-verified selectors', asy
@@ -332,7 +332,7 @@ index e143b30..485d3a9 100644
  
  test('charity red flower reward replies decode the verified result selectors', async () => {
 diff --git a/core/tests/email-daily-persistence.test.js b/core/tests/email-daily-persistence.test.js
-index 8b421a3..4cc2396 100644
+index 8b421a33b5363ae592201d3a00a5b4bdce30eb3c..4cc2396e69e2565534debcab2e6bd2400abe6093 100644
 --- a/core/tests/email-daily-persistence.test.js
 +++ b/core/tests/email-daily-persistence.test.js
 @@ -207,6 +207,7 @@ test('上游 Worker 的登录与跨日强制任务遵守邮箱时刻，同日整
@@ -344,7 +344,7 @@ index 8b421a3..4cc2396 100644
          '../services/automation-lock': require('../dist/services/automation-lock'),
          '../services/scheduler': { createScheduler: () => ({ clear: noop, setIntervalTask: (_name, ms, fn) => {
 diff --git a/core/tests/farm-interaction-cleanup.test.js b/core/tests/farm-interaction-cleanup.test.js
-index 7d48855..7604210 100644
+index 7d48855abac63a575e493d3ae506ee4829d8a53a..760421055ba101665ae08ead61eee75e987fb820 100644
 --- a/core/tests/farm-interaction-cleanup.test.js
 +++ b/core/tests/farm-interaction-cleanup.test.js
 @@ -100,7 +100,7 @@ test('crystal mutation uses the latest official effect_name mapping', () => {
@@ -358,10 +358,10 @@ index 7d48855..7604210 100644
          mutant_config_ids: [14],
 diff --git a/core/tests/friend-not-friend-retry.test.js b/core/tests/friend-not-friend-retry.test.js
 new file mode 100644
-index 0000000..ca42558
+index 0000000000000000000000000000000000000000..2e35dce6de31bc9c42d95102c4fd44e55db9d5e3
 --- /dev/null
 +++ b/core/tests/friend-not-friend-retry.test.js
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,121 @@
 +const assert = require('node:assert/strict');
 +const fs = require('node:fs');
 +const path = require('node:path');
@@ -382,6 +382,7 @@ index 0000000..ca42558
 +        '../../config/config': { PlantPhase: { MATURE: 6, DEAD: 7 } },
 +        '../../config/gameConfig': { getPlantName: () => 'plant', getPlantById: () => ({}), getItemById: () => ({}), getItemImageById: () => '' },
 +        '../../models/store': { isAutomationOn: key => flags[key], getFriendQuietHours: () => ({}), getFriendBlacklist: () => [], getPlantBlacklist: () => [], getFriendsListCacheTtlSec: () => 60 },
++        '../../utils/low-priority-gate': require('../dist/utils/low-priority-gate'),
 +        '../../utils/network': { getUserState: () => ({ gid: 999, accountId: 'test' }) },
 +        '../../utils/utils': { toNum: v => Number(v) || 0, getServerTimeSec: () => now / 1000, getSystemClockMinutes: () => 0,
 +            log: (...args) => calls.logs.push(args), logWarn: (...args) => calls.logs.push(args), sleep: async () => {}, randomDelay: async () => {} },
@@ -483,7 +484,7 @@ index 0000000..ca42558
 +    });
 +}
 diff --git a/core/tests/land-upgrade.test.js b/core/tests/land-upgrade.test.js
-index 2ec1724..f6465f3 100644
+index 2ec1724ad9c96f914b52279bfeccc7a3dd4b58df..f6465f3c77c6d9688c5ac615bc02e4f9d7d5d1c8 100644
 --- a/core/tests/land-upgrade.test.js
 +++ b/core/tests/land-upgrade.test.js
 @@ -5,8 +5,8 @@ const { buildLandUpgradeDetail } = require('../dist/services/farm/land-upgrade')
@@ -514,7 +515,7 @@ index 2ec1724..f6465f3 100644
      assert.equal(fallback.needLevel, 150);
      assert.equal(fallback.serverAllowed, false);
 diff --git a/core/tests/milk-tea.test.js b/core/tests/milk-tea.test.js
-index 11b8de0..73959e9 100644
+index 11b8de063370e7f92e17d96a5100776ac9a9cd57..73959e9bdccfe137ab1f27c675e740811d557726 100644
 --- a/core/tests/milk-tea.test.js
 +++ b/core/tests/milk-tea.test.js
 @@ -28,7 +28,7 @@ function harness() {
@@ -555,7 +556,7 @@ index 11b8de0..73959e9 100644
      const h = harness();
 diff --git a/core/tests/network-recovery-fence.test.js b/core/tests/network-recovery-fence.test.js
 new file mode 100644
-index 0000000..fd1d2de
+index 0000000000000000000000000000000000000000..fd1d2de60abf8cbdba3c18a9e77924c97e16c3a2
 --- /dev/null
 +++ b/core/tests/network-recovery-fence.test.js
 @@ -0,0 +1,83 @@
@@ -644,7 +645,7 @@ index 0000000..fd1d2de
 +});
 diff --git a/core/tests/network-recovery-routes.test.js b/core/tests/network-recovery-routes.test.js
 new file mode 100644
-index 0000000..db5f84b
+index 0000000000000000000000000000000000000000..db5f84b92f109c6b1be9ef0cea6e8817db85c280
 --- /dev/null
 +++ b/core/tests/network-recovery-routes.test.js
 @@ -0,0 +1,101 @@
@@ -750,7 +751,7 @@ index 0000000..db5f84b
 +    assert.equal(f.call('get', STATE).result.data.online, false);
 +});
 diff --git a/core/tests/network-session-stability.test.js b/core/tests/network-session-stability.test.js
-index 223338e..7516be9 100644
+index 223338ebbbb9ce07c8cfa7c6e59012dd2bb2f3c6..7516be91d2b13d85df3c0766703f01f80d0b2255 100644
 --- a/core/tests/network-session-stability.test.js
 +++ b/core/tests/network-session-stability.test.js
 @@ -34,7 +34,7 @@ function harness() {
@@ -763,7 +764,7 @@ index 223338e..7516be9 100644
      const sandbox = {
          require: name => overrides[name] || realRequire(name), module: { exports: {} }, exports: {},
 diff --git a/core/tests/player-scene-login.test.js b/core/tests/player-scene-login.test.js
-index bee4836..c8d866e 100644
+index bee4836dc2e88ca40a27d607b590497934b26491..c8d866ed9a22f92508f45a539e7bbede06ac4126 100644
 --- a/core/tests/player-scene-login.test.js
 +++ b/core/tests/player-scene-login.test.js
 @@ -20,7 +20,7 @@ async function harness(platform) {
@@ -775,3 +776,28 @@ index bee4836..c8d866e 100644
      };
      const sandbox = { require: name => overrides[name] || realRequire(name), module: { exports: {} }, exports: {}, Buffer, console: { warn() {} }, process, steps };
      vm.runInNewContext(`${fs.readFileSync(file, 'utf8')}
+diff --git a/web/tests/purchase-count.test.mjs b/web/tests/purchase-count.test.mjs
+index 27e9916d04bc9f6486190ec4df071304d15a0487..291ff29406da5df96fd74beff67eeab4b7f9b211 100644
+--- a/web/tests/purchase-count.test.mjs
++++ b/web/tests/purchase-count.test.mjs
+@@ -72,16 +72,16 @@ test('purchaseMaxCount caps by limit remaining, balance and hard cap', () => {
+       { id: 1042, count: 3, balance: 20 },
+     ],
+   }), 6)
+-  // 余额不足一份时下限为 1（提交时有余额校验兜底）
++  // 余额不足时禁止购买
+   assert.equal(purchaseMaxCount({
+     limitRemaining: 10,
+     costs: [{ id: 1041, count: 100, balance: 5 }],
+-  }), 1)
++  }), 0)
+   // 自定义硬上限
+   assert.equal(purchaseMaxCount({ limitRemaining: 50, costs: [], cap: 20 }), 20)
+-  // 限购剩余为 0（售罄兜底）也不低于 1
++  // 售罄时禁止购买
+   assert.equal(purchaseMaxCount({
+     limitRemaining: 0,
+     costs: [{ id: 1041, count: 1, balance: 100 }],
+-  }), 1)
++  }), 0)
+ })

@@ -1,6 +1,8 @@
 # qq-farm-autobuild
 自动跟踪 liyangpengs/qq-farm-bot 的 master 更新，云端构建并发布部署包。仓库不包含服务器凭据、农场账号或运行设置。
 
+2026-11-19: GitHub Actions polls upstream master on a 15-minute schedule. It applies the maintained patch using Git’s three-way merge, tests upstream’s native 牧歌初启 page, and preserves opt-in ranch actions. Conflicts and unexpected test failures stop publication. The server’s existing timer picks up the verified release using the v2 receiver.
+
 2026-11-17: `ranch-maintained-v2` adds a farm activity-center entry that opens the existing ranch activity page for 牧歌初启. It keeps the v1 scope: current upstream ranch functionality with only the existing friend-1001048 cooldown and bounded network-recovery fences, QQ login/Qmsg compatibility, and refreshed upstream test fixtures. The transactional receiver migrates v1 to v2 with `install-ranch-receiver.py`; milk tea automation remains disabled in the existing account settings. The original five client/TSDK audit warnings remain explicit; additional test failures block publication.
 
 
